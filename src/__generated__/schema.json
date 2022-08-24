@@ -1,0 +1,68 @@
+[
+  {
+    "name": "server",
+    "columns": [
+      {
+        "name": "host",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 1043,
+        "typeName": "VARCHAR"
+      },
+      {
+        "name": "id",
+        "isNullable": false,
+        "hasDefault": true,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
+        "name": "query_port",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
+        "name": "seed_channel_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 1043,
+        "typeName": "VARCHAR"
+      },
+      {
+        "name": "seed_threshold",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
+        "name": "tenant_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      }
+    ]
+  },
+  {
+    "name": "tenant",
+    "columns": [
+      {
+        "name": "guild_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 1042,
+        "typeName": "BPCHAR"
+      },
+      {
+        "name": "id",
+        "isNullable": false,
+        "hasDefault": true,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      }
+    ]
+  }
+]
