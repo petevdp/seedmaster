@@ -1,4 +1,6 @@
-version: '3.1'
+version: '3.2'
+volumes:
+  squad_data:
 services:
   db:
     image: postgres
@@ -10,3 +12,30 @@ services:
       POSTGRES_USER: pguser
       POSTGRES_PASSWORD: pguser
       POSTGRES_DB: pgdb
+  game_server:
+    image: cm2network/squad
+    stdin_open: true
+    tty: true
+    restart: always
+    volumes:
+      - type: bind
+        source: ./squadlogs
+        target: /home/steam/squad-dedicated/SquadGame/Saved/Logs
+      - squad_data:/home/steam/squad-dedicated/
+
+    environment:
+      - PORT=7787
+      - QUERYPORT=27165
+      - RCONPORT=21114
+      - FIXEDMAXPLAYERS=100
+    ports:
+      - 7787:7787/tcp
+      - 7788:7788/tcp
+      - 27165:27165/tcp
+      - 27166:27166/tcp
+      - 21114:21114/tcp
+      - 7787:7787/udp
+      - 7788:7788/udp
+      - 27165:27165/udp
+      - 27166:27166/udp
+      - 21114:21114/udp
