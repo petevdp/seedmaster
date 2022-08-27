@@ -1,12 +1,4 @@
-
-export type Seeder = {
-  readonly discordId: string;
-  readonly steamId: string;
-  readonly preferences: {
-    readonly notificationsEnabled: boolean;
-    readonly notifyWhen: 'online' | 'playing' | 'always'
-  };
-};
+import { Seeder } from './__generated__';
 
 export type SeedAttempt = {
   readonly attemptId: string;
@@ -29,3 +21,16 @@ export type SeederResponse = {
 type Config = {
   readonly seedChannel: string;
 };
+
+
+export enum NotifyWhen {
+  Online,
+  Playing,
+  Always,
+  Never
+}
+
+export type NotifyStatus = {
+  seeder: Seeder;
+  shouldNotify: boolean;
+}

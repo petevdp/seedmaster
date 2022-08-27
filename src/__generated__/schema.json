@@ -1,5 +1,17 @@
 [
   {
+    "name": "player",
+    "columns": [
+      {
+        "name": "steam_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 20,
+        "typeName": "BIGINT"
+      }
+    ]
+  },
+  {
     "name": "seed_log",
     "columns": [
       {
@@ -24,14 +36,14 @@
         "typeName": "INTEGER"
       },
       {
-        "name": "seed_session_log_id",
+        "name": "player_id",
         "isNullable": false,
         "hasDefault": false,
-        "typeId": 23,
-        "typeName": "INTEGER"
+        "typeId": 20,
+        "typeName": "BIGINT"
       },
       {
-        "name": "seeder_id",
+        "name": "seed_session_log_id",
         "isNullable": false,
         "hasDefault": false,
         "typeId": 23,
@@ -92,16 +104,9 @@
       {
         "name": "id",
         "isNullable": false,
-        "hasDefault": false,
+        "hasDefault": true,
         "typeId": 23,
         "typeName": "INTEGER"
-      },
-      {
-        "name": "notify",
-        "isNullable": false,
-        "hasDefault": false,
-        "typeId": 16,
-        "typeName": "BOOL"
       },
       {
         "name": "notify_when",
@@ -144,15 +149,15 @@
         "typeName": "INTEGER"
       },
       {
-        "name": "seed_channel_id",
+        "name": "seed_max_players",
         "isNullable": false,
         "hasDefault": false,
-        "typeId": 1043,
-        "typeName": "VARCHAR"
+        "typeId": 23,
+        "typeName": "INTEGER"
       },
       {
-        "name": "seed_threshold",
-        "isNullable": false,
+        "name": "seed_min_players",
+        "isNullable": true,
         "hasDefault": false,
         "typeId": 23,
         "typeName": "INTEGER"
@@ -174,14 +179,33 @@
     ]
   },
   {
+    "name": "server_seeder",
+    "columns": [
+      {
+        "name": "seeder_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
+        "name": "server_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      }
+    ]
+  },
+  {
     "name": "tenant",
     "columns": [
       {
         "name": "guild_id",
         "isNullable": false,
         "hasDefault": false,
-        "typeId": 1042,
-        "typeName": "BPCHAR"
+        "typeId": 20,
+        "typeName": "BIGINT"
       },
       {
         "name": "id",
@@ -189,6 +213,20 @@
         "hasDefault": true,
         "typeId": 23,
         "typeName": "INTEGER"
+      },
+      {
+        "name": "seed_channel_id",
+        "isNullable": true,
+        "hasDefault": false,
+        "typeId": 20,
+        "typeName": "BIGINT"
+      },
+      {
+        "name": "signup_message_id",
+        "isNullable": true,
+        "hasDefault": false,
+        "typeId": 20,
+        "typeName": "BIGINT"
       }
     ]
   }

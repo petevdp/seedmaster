@@ -13,6 +13,7 @@ specifiers:
   '@types/gamedig': ^3.0.2
   '@types/lodash': ^4.14.184
   '@types/node': ^18.7.1
+  '@types/steamapi': ^2.2.2
   '@types/uuid': ^8.3.4
   '@types/ws': ^8.5.3
   '@typescript-eslint/eslint-plugin': ^4.0.1
@@ -41,6 +42,7 @@ specifiers:
   prettier: ^2.1.1
   rxjs: ^7.5.6
   standard-version: ^9.0.0
+  steamapi: ^2.2.0
   ts-dotenv: ^0.8.3
   ts-node: ^9.0.0
   typedoc: ^0.19.0
@@ -57,6 +59,7 @@ dependencies:
   '@lpgera/ts-env': 1.2.1
   '@types/express': 4.17.13
   '@types/lodash': 4.14.184
+  '@types/steamapi': 2.2.2
   '@types/uuid': 8.3.4
   '@types/ws': 8.5.3
   async-mutex: 0.3.2
@@ -68,6 +71,7 @@ dependencies:
   is-valid-hostname: 1.0.2
   lodash: 4.17.21
   rxjs: 7.5.6
+  steamapi: 2.2.0
   ts-dotenv: 0.8.3
   uuid: 8.3.2
   ws: 8.8.1
@@ -1033,6 +1037,10 @@ packages:
     dependencies:
       '@types/mime': 3.0.1
       '@types/node': 18.7.11
+    dev: false
+
+  /@types/steamapi/2.2.2:
+    resolution: {integrity: sha512-I64sxNOaTtp8/pFqhgz1niI8sIEgnRLv1xF8juq7nNRiyWiCWMm+bnwD4oo06nhzQH0xZt6pG0RQipmBWMFxPg==}
     dev: false
 
   /@types/through/0.0.30:
@@ -5996,6 +6004,17 @@ packages:
   /statuses/2.0.1:
     resolution: {integrity: sha512-RwNA9Z/7PrK06rYLIzFMlaF+l73iwpzsqRIFgbMLbTcLD6cOao82TaWefPXQvB2fOC4AjuYSEndS7N/mTCbkdQ==}
     engines: {node: '>= 0.8'}
+    dev: false
+
+  /steamapi/2.2.0:
+    resolution: {integrity: sha512-2UWklLzYQruuUC0a5AUgll1dU91/CWgiAhm/7y+rqc43kbBWereGTtmwo8wr6imjC64iV5893KChXghW0zK8Gg==}
+    dependencies:
+      steamid: 2.0.0
+    dev: false
+
+  /steamid/2.0.0:
+    resolution: {integrity: sha512-+BFJMbo+IxzyfovLR37E7APkaNfmrL3S+88T7wTMRHnQ6LBhzEawPnjfWNKM9eUL/dH45j+7vhSX4WaGXoa4/Q==}
+    engines: {node: '>=12.0.0'}
     dev: false
 
   /stream-events/1.0.5:

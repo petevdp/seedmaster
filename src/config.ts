@@ -2,19 +2,17 @@ import conf from '../config.json';
 import { Server, Tenant } from './__generated__';
 import { Player } from './squadServer';
 
-export type ServerConfig = {  host: string
+export type ServerConfig = {
   /**
    * @default nextval('server_id_seq'::regclass)
    */
-  id: number & {readonly __brand?: 'server_id'}
-  query_port: number
-  seed_channel_id: string
-  seed_threshold: number
   squadjs_ws_addr: string
-}
+} & Server;
 
 export type TenantConfig = {
   guild_id: string;
+  seeding_role: 'Seeder';
+  seeding_channel_id: string;
   servers: ServerConfig[];
   shim_squadjs?: {
     starting_players: Player[]

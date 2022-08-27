@@ -1,5 +1,7 @@
 import express from 'express';
 import { Observable } from 'rxjs';
+import GameDig from 'gamedig';
+import { share } from 'rxjs/operators';
 import WebSocket from 'ws';
 import { Server } from './__generated__';
 import { config } from './config';
@@ -21,6 +23,24 @@ type SquadJSMessage = { time: Date; } & ({
   type: 'playerJoined' | 'playerLeft'
   player: Player;
 });
+
+
+export async function queryGameServer(host: string, query_port: number) {
+  if (config.shim_squadjs) {
+    const res = {
+      name: 'test squad server',
+      players: [],
+      maxplayers: 100
+    } as unknown as GameDig.QueryResult;
+    return res;
+  }
+  const res = GameDig.query({
+    type: 'squad',
+    host: host,
+    port: query_port
+  });
+  return res;
+}
 
 export function getServerPlayerChange$(server: Server): Observable<TimedChange<Player>> {
   if (config.shim_squadjs) {
@@ -62,12 +82,10 @@ export function getServerPlayerChange$(server: Server): Observable<TimedChange<P
       });
 
 
-      s.next();
-
       return () => {
         server.close();
       };
-    });
+    }).pipe(share());
   }
   return new Observable<TimedChange<Player>>((s) => {
     console.log('connecting to websocket ', server.squadjs_ws_addr);

@@ -1,0 +1,7 @@
+{
+  "types": {
+    "typeOverrides": {
+      "int8": "bigint"
+    }
+  }
+}

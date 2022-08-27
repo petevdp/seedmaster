@@ -5,9 +5,9 @@ import jsonSchema from './__generated__/schema.json';
 
 export {sql};
 
-export const getConfiguredConnectionPool = () => createConnectionPool();
+export const getConfiguredConnectionPool = () => createConnectionPool({bigIntMode: "bigint"});
 
 // You can list whatever tables you actually have here:
-export const {server,tenant} = tables<DatabaseSchema>({
+export const {server,tenant, seed_log, seed_session_log, player, seeder, server_seeder} = tables<DatabaseSchema>({
   databaseSchema: jsonSchema,
 });
