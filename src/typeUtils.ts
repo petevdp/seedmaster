@@ -1,6 +1,6 @@
-export function isPartialPopulated(partial: Partial<unknown>, keys: string[]): boolean {
+export function isPartialPopulated(partial: Partial<any>, keys: (keyof Partial<any>)[]): boolean {
   for (let key of keys) {
-    if (partial[key] === undefined) false;
+    if (partial[key as string] as any === undefined) return false;
   }
   return true;
 }

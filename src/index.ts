@@ -56,14 +56,6 @@ import { queryGameServer } from './squadServer';
 import hoursToMinutes from 'date-fns/hoursToMinutes';
 import minutesToMilliseconds from 'date-fns/minutesToMilliseconds';
 
-let db: ConnectionPool;
-
-let environment: Environment;
-let discordClient: discord.Client<boolean>;
-const seederResponses: Map<string, SeederResponse> = new Map();
-let guildId: string;
-let instanceTenant: Tenant;
-
 
 async function retrieveConfig() {
   return;
@@ -83,21 +75,19 @@ function getSeedEmbedTitle(server: Server, displayedName: string) {
 }
 
 
-async function main() {
-  // load environment
-  console.log('running main');
+function main() {
+  let db: ConnectionPool = getConfiguredConnectionPool();
+  let environment: Environment = retrieveEnvironment();
 
-  environment = retrieveEnvironment();
+  let deferredDiscordClient: Promise<discord.Client> = (async () => {
+    const client = new discord.Client({ intents: ['GuildMembers', 'Guilds', 'GuildMessages'] });
+    await client.login(environment.DISCORD_BOT_TOKEN);
+    return client;
+  })();
 
-  discordClient = new discord.Client({ intents: ['GuildMembers', 'Guilds', 'GuildMessages'] });
-
-  {
-    // configure db connection
-    db = getConfiguredConnectionPool();
-  }
-  {
+  let deferredInstanceTenant: Promise<Tenant> = (async () => {
     // get tenant info
-    [instanceTenant] = await schema.tenant(db)
+    const [instanceTenant] = await schema.tenant(db)
       .insertOrUpdate(
         ['guild_id'],
         {
@@ -105,33 +95,34 @@ async function main() {
           seed_channel_id: BigInt(config.seeding_channel_id)
         }
       );
-  }
+    return instanceTenant;
+  })();
 
-  await discordClient.login(environment.DISCORD_BOT_TOKEN);
-  const guilds = await discordClient.guilds.fetch();
-  const tenantGuild = [...guilds][0][1];
-  let guild = await tenantGuild.fetch();
+  // const guilds = await discordClient.guilds.fetch();
+  // const tenantGuild = [...guilds][0][1];
+  // let guild = await tenantGuild.fetch();
 
 
-  {
+  const discordCommandsRegistered: Promise<void> = (async function registerDiscordCommands() {
+    const instanceTenant = await deferredInstanceTenant;
     // register application commands
-
     const commands = [
       new SlashCommandBuilder().setName('sm-configure-server').setDescription('reconfigure an existing server')
         .addSubcommand((cmd) => cmd.setName('add').setDescription('Configure a new server'))
     ];
     const rest = new REST({ version: '10' }).setToken(environment.DISCORD_BOT_TOKEN);
-    await rest.put(Routes.applicationGuildCommands(environment.DISCORD_CLIENT_ID, guild.id), { body: commands });
+    await rest.put(Routes.applicationGuildCommands(environment.DISCORD_CLIENT_ID, instanceTenant.guild_id.toString()), { body: commands });
     console.log('successfully registered application commands');
-  }
+  })();
 
   // create sign up message
   const signUpFieldIds = {
     notifyWhen: 'notifyWhen',
     signUpButton: 'signUp-' + uuidv4()
   };
-  let signUpMessage$: discord.Message = await (async () => {
-    const channel = await discordClient.channels.fetch(config.seeding_channel_id);
+  let deferredSignUpMessage: Promise<discord.Message> = (async () => {
+    const discordClient = await deferredDiscordClient;
+    const [instanceTenant, channel] = await Promise.all([deferredInstanceTenant, discordClient.channels.fetch(config.seeding_channel_id)]);
     if (!channel!.isTextBased()) {
       throw new Error('seeding channel should be text based');
     }
@@ -143,8 +134,7 @@ async function main() {
     const notifyWhenSelectMenu = new SelectMenuBuilder()
       .setCustomId(signUpFieldIds.notifyWhen)
       .setPlaceholder('Nothing Selected')
-      .addOptions(
-        {
+      .addOptions({
           label: 'Online',
           value: '0'
         },
@@ -186,9 +176,10 @@ async function main() {
     }
   })();
 
-  {
-    const serversInDb = await schema.server(db).select({ tenant_id: instanceTenant.id }).all();
 
+  const deferredServers = (async () => {
+    const instanceTenant = await deferredInstanceTenant;
+    const serversInDb = await schema.server(db).select({ tenant_id: instanceTenant.id }).all();
     for (let configured of config.servers) {
       await schema.server(db).insertOrUpdate(['id'], {
         ...configured,
@@ -200,21 +191,22 @@ async function main() {
         await schema.server(db).delete({ id: s.id });
       }
     }
+    return schema.server(db).select({}).all();
+  })();
 
+  const steamClient = new SteamAPI(environment.STEAM_API_KEY);
 
-    const allServers = await schema.server(db).select({}).all();
-    const steam = new SteamAPI(environment.STEAM_API_KEY);
-    console.table(allServers);
-
-    let seeder$: ConnectableObservable<Change<Seeder>>;
-    {
-      const existingSeeder$ = from(await schema.seeder(db).select().all()).pipe(map((s): Change<Seeder> => ({
-        type: 'added',
-        elt: s
-      })));
-      const signupModalIds = {
-        steamId: 'steamId'
-      };
+  // Track seeders onto the database and emit the resulting entries
+  let deferredSeeder$: Promise<ConnectableObservable<Change<Seeder>>> = (async function observeAndPersistSeeders() {
+    const existingSeeder$ = from(await schema.seeder(db).select().all()).pipe(map((s): Change<Seeder> => ({
+      type: 'added',
+      elt: s
+    })));
+    const signupModalIds = {
+      steamId: 'steamId'
+    };
+    const discordClient = await deferredDiscordClient;
+    (function observeSignUpButton() {
       getInteractionObservable(discordClient).subscribe(
         // get seeder from interaction
         async (rawInteraction) => {
@@ -254,108 +246,80 @@ async function main() {
           }
         }
       );
+    })();
 
-      let newSeeder$: ConnectableObservable<Change<Seeder>>;
-      {
-        const o: Observable<Change<Seeder>> = getInteractionObservable(discordClient).pipe(
-          mergeMap(async (rawInteraction): Promise<Change<Seeder> | undefined> => {
-            if (!rawInteraction.isModalSubmit()) return;
-            const interaction = rawInteraction as ModalSubmitInteraction;
-            const rawSteamId = interaction.fields.getTextInputValue(signupModalIds.steamId).trim();
-            const steamId = BigInt(rawSteamId);
-            if (!(steamId)) throw new InteractionError('steamId is invalid', interaction);
-            try {
-              await steam.getUserSummary([rawSteamId]);
-              // TODO: perform 0auth authentication to ensure user actually owns account for steamId
-            } catch (err) {
-              if (!(err instanceof Error) || (err instanceof InteractionError) || !err.message.includes('No players found')) throw err;
-              throw new InteractionError(`unable to find steam user with id ${steamId} `, interaction);
-            }
-
-            await schema.player(db).insertOrIgnore({ steam_id: steamId });
-            try {
-              const [newSeeder] = await schema.seeder(db).insert({
-                steam_id: steamId,
-                discord_id: BigInt(interaction.user.id),
-                notify_when: 1
-              });
-              return { elt: newSeeder, type: 'added' };
-            } catch (err: any) {
-              if (err.code === '23505') {
-                throw new InteractionError('you\'re already signed up!', interaction);
-              }
-              throw err;
-            }
-            return;
-          }),
-          // avoid duplicating database entries
-          share(),
-          catchError((err, o) => o),
-          concatMap(m => !!m ? of(m) : EMPTY)
-        );
-        newSeeder$ = new ConnectableObservable(o, () => new Subject());
-      }
-
-
-      newSeeder$.pipe(
-        filter(c => c.type === 'added'),
-        map(c => c.elt)
-      ).subscribe(async addedSeeder => {
-        const members = await guild.members.fetch({});
-        for (let member of members.values()) {
-          if (member.id !== addedSeeder.id.toString()) continue;
-          member.send('test');
-          break;
+    const newSeeder$: Observable<Change<Seeder>> = getInteractionObservable(discordClient).pipe(
+      mergeMap(async (rawInteraction): Promise<Change<Seeder> | undefined> => {
+        if (!rawInteraction.isModalSubmit()) return;
+        const interaction = rawInteraction as ModalSubmitInteraction;
+        const rawSteamId = interaction.fields.getTextInputValue(signupModalIds.steamId).trim();
+        const steamId = BigInt(rawSteamId);
+        if (!(steamId)) throw new InteractionError('steamId is invalid', interaction);
+        try {
+          await steamClient.getUserSummary([rawSteamId]);
+          // TODO: perform 0auth authentication to ensure user actually owns account for steamId
+        } catch (err) {
+          if (!(err instanceof Error) || (err instanceof InteractionError) || !err.message.includes('No players found')) throw err;
+          throw new InteractionError(`unable to find steam user with id ${steamId} `, interaction);
         }
-      });
 
-      const updatedSeeder$: Observable<Change<Seeder>> = getInteractionObservable(discordClient).pipe(
-        mergeMap(async (rawInteraction): Promise<Change<Seeder> | undefined> => {
-          if (rawInteraction.isSelectMenu()) return;
-          const interaction = rawInteraction as Interaction as SelectMenuInteraction;
-          if (interaction.customId !== signUpFieldIds.notifyWhen) return;
-          const notifyWhen = parseInt(interaction.values[0]);
-          const seeder = allSeedersByDiscordId.get(BigInt(interaction.user.id));
-          if (!seeder) return;
-          const [updated] = await schema.seeder(db).update({ id: seeder.id }, { notify_when: notifyWhen });
-          return {
-            elt: updated,
-            type: 'updated'
-          };
-        }),
-        share(),
-        // ignore falsy values
-        concatMap(m => !!m ? of(m) : EMPTY)
+        await schema.player(db).insertOrIgnore({ steam_id: steamId });
+        try {
+          const [newSeeder] = await schema.seeder(db).insert({
+            steam_id: steamId,
+            discord_id: BigInt(interaction.user.id),
+            notify_when: 1
+          });
+          return { elt: newSeeder, type: 'added' };
+        } catch (err: any) {
+          if (err.code === '23505') {
+            throw new InteractionError('you\'re already signed up!', interaction);
+          }
+          throw err;
+        }
+        return;
+      }),
+      // avoid duplicating database entries
+      share(),
+      catchError((err, o) => o),
+      concatMap(m => !!m ? of(m) : EMPTY)
+    );
+
+    const updatedSeeder$: Observable<Change<Seeder>> =  getInteractionObservable(discordClient).pipe(
+      mergeMap(async (rawInteraction): Promise<Change<Seeder> | undefined> => {
+        if (rawInteraction.isSelectMenu()) return;
+        const interaction = rawInteraction as Interaction as SelectMenuInteraction;
+        if (interaction.customId !== signUpFieldIds.notifyWhen) return;
+        const notifyWhen = parseInt(interaction.values[0]);
+        const seeder = allSeedersByDiscordId.get(BigInt(interaction.user.id));
+        if (!seeder) return;
+        const [updated] = await schema.seeder(db).update({ id: seeder.id }, { notify_when: notifyWhen });
+        return {
+          elt: updated,
+          type: 'updated'
+        };
+      }),
+      share(),
+      // ignore falsy values
+      concatMap(m => !!m ? of(m) : EMPTY)
+    );
+    const allSeeder$ = of(existingSeeder$, newSeeder$).pipe(concatAll());
+
+    return new ConnectableObservable(of(allSeeder$, updatedSeeder$).pipe(mergeAll()), () => new Subject());
+  })();
+
+  // map tracking all seeders
+  const allSeedersByDiscordId: Map<bigint, Seeder> = new Map();
+  deferredSeeder$.then(seeder$ => seeder$.subscribe(seeder => allSeedersByDiscordId.set(seeder.elt.discord_id, seeder.elt)));
+  (function setupServers() {
+    Promise.all([deferredDiscordClient, deferredServers, deferredInstanceTenant, deferredSeeder$])
+      .then(([discordClient, servers, instanceTenant, seeder$]) =>
+        Promise.all(servers.map((s) =>
+          setupServer(s, discordClient, steamClient, instanceTenant, db, seeder$, allSeedersByDiscordId)
+        ))
       );
-      const allSeeder$ = of(existingSeeder$, newSeeder$).pipe(concatAll());
-
-      seeder$ = new ConnectableObservable(of(allSeeder$, updatedSeeder$).pipe(mergeAll()), () => new Subject());
-      newSeeder$.connect();
-    }
-
-    let allSeedersByDiscordId: Map<bigint, Seeder>;
-    {
-      allSeedersByDiscordId = new Map();
-      seeder$.subscribe(seeder => {
-        allSeedersByDiscordId.set(seeder.elt.discord_id, seeder.elt);
-      });
-    }
-
-    await Promise.all(allServers.map(async (s) =>
-      setupServer(s, discordClient, steam, instanceTenant, db, seeder$, allSeedersByDiscordId)
-    ));
-
-    seeder$.connect();
-  }
+  })();
+  deferredSeeder$.then(seeder$ => seeder$.connect());
 }
 
-function registerInteractions() {
-
-}
-
-
-try {
-  main();
-} catch (err) {
-  console.log(err);
-}
+main();

@@ -70,6 +70,3 @@ export function getPresenceObservable(client: discord.Client): Observable<discor
     };
   });
 }
-
-
-export function
