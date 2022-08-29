@@ -10,3 +10,10 @@ export function ensurePartialPopulated<T>(partial: Partial<T>, keys: string[]): 
   if (isPartialPopulated(partial, keys)) return partial as T;
   throw new  Error('partial is unpopulated: ' + JSON.stringify(partial));
 }
+
+export type ReadOnlyMap<K,V> = Omit<Map<K,V>, 'set' | 'delete' | 'clear'>
+
+
+export function isNonNulled<T>(value: T): value is NonNullable<T> {
+  return value != null;
+}

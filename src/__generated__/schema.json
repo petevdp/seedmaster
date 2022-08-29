@@ -157,7 +157,7 @@
       },
       {
         "name": "seed_min_players",
-        "isNullable": true,
+        "isNullable": false,
         "hasDefault": false,
         "typeId": 23,
         "typeName": "INTEGER"
@@ -227,6 +227,18 @@
         "hasDefault": false,
         "typeId": 20,
         "typeName": "BIGINT"
+      }
+    ]
+  },
+  {
+    "name": "users_prompted_for_signup",
+    "columns": [
+      {
+        "name": "discord_id",
+        "isNullable": true,
+        "hasDefault": false,
+        "typeId": 24706,
+        "typeName": "HSTORE"
       }
     ]
   }

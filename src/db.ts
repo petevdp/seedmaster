@@ -8,6 +8,6 @@ export {sql};
 export const getConfiguredConnectionPool = () => createConnectionPool({bigIntMode: "bigint"});
 
 // You can list whatever tables you actually have here:
-export const {server,tenant, seed_log, seed_session_log, player, seeder, server_seeder} = tables<DatabaseSchema>({
+export const {server,tenant, seed_log, seed_session_log, player, seeder, server_seeder, users_prompted_for_signup } = tables<DatabaseSchema>({
   databaseSchema: jsonSchema,
 });

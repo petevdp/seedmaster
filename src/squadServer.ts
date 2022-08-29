@@ -5,9 +5,10 @@ import { share } from 'rxjs/operators';
 import WebSocket from 'ws';
 import { Server } from './__generated__';
 import { config } from './config';
+import { registerInputObservable } from './cleanup';
 import { Change, TimedChange } from './manageSeeders';
 
-export type Player = {
+export type RawPlayer = {
   playerID: string;
   steamID: string;
   name: string;
@@ -18,10 +19,10 @@ export type Player = {
 
 type SquadJSMessage = { time: Date; } & ({
   type: 'init',
-  players: Player[];
+  players: RawPlayer[];
 } | {
   type: 'playerJoined' | 'playerLeft'
-  player: Player;
+  player: RawPlayer;
 });
 
 
@@ -42,10 +43,10 @@ export async function queryGameServer(host: string, query_port: number) {
   return res;
 }
 
-export function getServerPlayerChange$(server: Server): Observable<TimedChange<Player>> {
+export function getServerPlayerChange$(server: Server): Observable<TimedChange<RawPlayer>> {
   if (config.shim_squadjs) {
-    return new Observable<TimedChange<Player>>((s) => {
-      let players: Map<string, Player> = new Map();
+    return new Observable<TimedChange<RawPlayer>>((s) => {
+      let players: Map<string, RawPlayer> = new Map();
       for (let player of config.shim_squadjs!.starting_players) {
         players.set(player.steamID, player);
       }
@@ -53,7 +54,7 @@ export function getServerPlayerChange$(server: Server): Observable<TimedChange<P
       app.use(express.json());
       app.post('/players', (req, res) => {
         console.log({ postedPlayer: req.body });
-        const player = req.body as Player;
+        const player = req.body as RawPlayer;
         players.set(player.steamID, player);
         // TODO: format dates to match the actual logs
         s.next({
@@ -61,7 +62,7 @@ export function getServerPlayerChange$(server: Server): Observable<TimedChange<P
           elt: player,
           time: new Date()
         });
-        res.send(200);
+        res.send(201);
       });
       app.delete('/players/:id', (req, res) => {
         console.log({ deletedPlayer: req.params.id });
@@ -85,9 +86,9 @@ export function getServerPlayerChange$(server: Server): Observable<TimedChange<P
       return () => {
         server.close();
       };
-    }).pipe(share());
+    }).pipe(share(), registerInputObservable());
   }
-  return new Observable<TimedChange<Player>>((s) => {
+  return new Observable<TimedChange<RawPlayer>>((s) => {
     console.log('connecting to websocket ', server.squadjs_ws_addr);
     const ws = new WebSocket(server.squadjs_ws_addr);
 
@@ -126,5 +127,5 @@ export function getServerPlayerChange$(server: Server): Observable<TimedChange<P
       ws.off('close', closeListener);
       ws.off('message', messageListener);
     };
-  });
+  }).pipe(registerInputObservable());
 }

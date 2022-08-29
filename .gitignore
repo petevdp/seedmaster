@@ -10,3 +10,4 @@ coverage
 yarn.lock
 /env.json
 .env
+/src/logs/

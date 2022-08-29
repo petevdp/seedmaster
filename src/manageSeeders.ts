@@ -40,3 +40,4 @@ export function getScanned<T,K>(getKey: (elt: T) => K) {
     return [...elts.values()];
   };
 }
+

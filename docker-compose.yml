@@ -6,6 +6,9 @@ services:
     image: postgres
     volumes:
       - /private/var/lib/postgresql:/var/lib/postgresql
+      - type: bind
+        source: ./schema
+        target: /run/schema
     ports:
       - "5432:5432"
     environment:
@@ -17,11 +20,11 @@ services:
     stdin_open: true
     tty: true
     restart: always
-    volumes:
-      - type: bind
-        source: ./squadlogs
-        target: /home/steam/squad-dedicated/SquadGame/Saved/Logs
-      - squad_data:/home/steam/squad-dedicated/
+#    volumes:
+#      - type: bind
+#        source: ./squadlogs
+#        target: /home/steam/squad-dedicated/SquadGame/Saved/Logs
+#      - squad_data:/home/steam/squad-dedicated/
 
     environment:
       - PORT=7787
