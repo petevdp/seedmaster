@@ -77,27 +77,6 @@ import { NotifyWhen, SeederResponse } from './models';
 import { setupServer } from './setupServer';
 import { v4 as uuidv4 } from 'uuid';
 
-/**
- * TODO: remove
- */
-
-async function retrieveConfig() {
-  return;
-}
-
-
-function extEmbedFromSeedMessage(channel: TextChannel, serverId: number) {
-  for (let msg of channel.messages.cache.values()) {
-    for (let embed of msg.embeds) {
-    }
-  }
-}
-
-
-function getSeedEmbedTitle(server: Server, displayedName: string) {
-  return displayedName + ` - (${server.id})`;
-}
-
 export default function main() {
   logger.info('startup');
   let db: ConnectionPool = getConfiguredConnectionPool();
