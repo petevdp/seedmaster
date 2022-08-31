@@ -62,6 +62,13 @@
     "name": "seed_session_log",
     "columns": [
       {
+        "name": "end_reason",
+        "isNullable": true,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
         "name": "end_time",
         "isNullable": true,
         "hasDefault": false,
@@ -142,6 +149,13 @@
         "typeName": "INTEGER"
       },
       {
+        "name": "player_threshold_coefficient",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 701,
+        "typeName": "FLOAT8"
+      },
+      {
         "name": "query_port",
         "isNullable": false,
         "hasDefault": false,
@@ -149,18 +163,39 @@
         "typeName": "INTEGER"
       },
       {
-        "name": "seed_max_players",
+        "name": "seed_failed_threshold",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 701,
+        "typeName": "FLOAT8"
+      },
+      {
+        "name": "seed_start_threshold",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 701,
+        "typeName": "FLOAT8"
+      },
+      {
+        "name": "seed_success_player_count",
         "isNullable": false,
         "hasDefault": false,
         "typeId": 23,
         "typeName": "INTEGER"
       },
       {
-        "name": "seed_min_players",
+        "name": "seeder_max_response_time",
         "isNullable": false,
         "hasDefault": false,
         "typeId": 23,
         "typeName": "INTEGER"
+      },
+      {
+        "name": "seeder_threshold_coefficient",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 701,
+        "typeName": "FLOAT8"
       },
       {
         "name": "squadjs_ws_addr",
@@ -171,6 +206,39 @@
       },
       {
         "name": "tenant_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      }
+    ]
+  },
+  {
+    "name": "server_managed_message",
+    "columns": [
+      {
+        "name": "channel_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 20,
+        "typeName": "BIGINT"
+      },
+      {
+        "name": "message_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 20,
+        "typeName": "BIGINT"
+      },
+      {
+        "name": "role",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
+        "name": "server_id",
         "isNullable": false,
         "hasDefault": false,
         "typeId": 23,
