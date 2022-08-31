@@ -31,9 +31,12 @@ import {
   throwError,
   combineLatest,
   connectable,
-  Connectable, Subscription
+  Connectable,
+  Subscription,
+  fromEvent
 } from 'rxjs';
 import {
+  first,
   catchError,
   share,
   tap,
@@ -69,7 +72,7 @@ import { Environment, environment } from './globalServices/environment';
 import {
   registerInputObservable,
   addSubToMaster,
-  tryToFlushInputObservables
+  tryToFlushInputObservables, getObserverCountRepr, getObserverCountRepr$
 } from './cleanup';
 import { logger, steamClient } from './globalServices/logger';
 import { parseTimespan } from './lib/timespan';
@@ -103,7 +106,7 @@ export default function main() {
   })();
 
   async function getGuild() {
-    return (await deferredDiscordClient).guilds.fetch((await deferredInstanceTenant).guild_id.toString())
+    return (await deferredDiscordClient).guilds.fetch((await deferredInstanceTenant).guild_id.toString());
   }
 
   const _observeNotifiable = (discordId: bigint, steamId: bigint, notifySetting$: Observable<NotifyWhen>) => {
@@ -153,13 +156,13 @@ export default function main() {
 
   const rolesDeferred = (async function ensureRolesCreated() {
     const guild = await getGuild();
-    const roles = await guild.roles.fetch()
+    const roles = await guild.roles.fetch();
 
-    let role = roles.find(r => r.name === config.seeding_role)
+    let role = roles.find(r => r.name === config.seeding_role);
     if (!role) {
-      role = await guild.roles.create({name: config.seeding_role});
+      role = await guild.roles.create({ name: config.seeding_role });
     }
-    return {seeding: role};
+    return { seeding: role };
   })();
 
   // discord user ids
@@ -172,7 +175,7 @@ export default function main() {
   const signUpMessages = new Set<string>();
   (function promptSignups() {
     const signupMtx = new Mutex();
-    addSubToMaster(usersToPromptForSignup$, {
+    addSubToMaster(usersToPromptForSignup$, 'promptSignups', {
       next: async discordId => {
         await signupMtx.acquire();
         try {
@@ -256,6 +259,7 @@ export default function main() {
       const contextLogger = logger.child({ context: 'observeSignUpButton' });
       addSubToMaster(
         interaction$,
+        'observeSignUpButtons',
         {
           // get seeder from interaction
           next: async (rawInteraction) => {
@@ -325,7 +329,7 @@ export default function main() {
           try {
             const guild = await getGuild();
             const user = await guild.members.fetch(interaction.user.id);
-            user.roles.add((await rolesDeferred).seeding)
+            user.roles.add((await rolesDeferred).seeding);
             const [newSeeder] = await schema.seeder(db).insert({
               steam_id: steamId,
               discord_id: BigInt(interaction.user.id),
@@ -412,8 +416,8 @@ export default function main() {
   // map tracking all seeders TODO: eventually stop storing all seeders in process memory
   const allSeedersByDiscordId: Map<bigint, Seeder> = new Map();
   const allSeedersBySteamId: Map<bigint, Seeder> = new Map();
-  addSubToMaster(seeder$, { next: accumulateMap(allSeedersBySteamId, s => s.discord_id) });
-  addSubToMaster(seeder$, { next: accumulateMap(allSeedersByDiscordId, s => s.steam_id) });
+  addSubToMaster(seeder$, 'allSeedersBySteamId', { next: accumulateMap(allSeedersBySteamId, s => s.discord_id) });
+  addSubToMaster(seeder$, 'allSeedersByDiscordId', { next: accumulateMap(allSeedersByDiscordId, s => s.steam_id) });
 
   (function setupServers() {
     serversDeferred.then(servers => {
@@ -431,11 +435,14 @@ export default function main() {
           allSeedersBySteamId
         );
 
-        addSubToMaster(serverSeedSignupAttempt$, usersToPromptForSignup$);
+        addSubToMaster(serverSeedSignupAttempt$,'usersToPromptForSignup$', usersToPromptForSignup$);
       }
+
+      logger.info(`Active observers after servers setup: ${getObserverCountRepr()}`);
     });
   })();
   seeder$.connect();
+  logger.info(`Active observers on main end: ${getObserverCountRepr()}`);
 }
 
 function observeNotifiable(discordClient: discord.Client, tenant: Tenant, discordId: bigint, steamId: bigint, notifySetting$: Observable<NotifyWhen>): Observable<boolean> {
@@ -446,10 +453,10 @@ function observeNotifiable(discordClient: discord.Client, tenant: Tenant, discor
     .then(member => member.fetch())
     .then(member => member.presence as discord.Presence);
   currentPresence$.then(p => {
-    logger.info(p)
+    logger.info(p);
   });
 
-  const presence$ = of(currentPresence$, presenceUpdate$).pipe(mergeAll(),tap(p => logger.info(p)));
+  const presence$ = of(currentPresence$, presenceUpdate$).pipe(mergeAll(), tap(p => logger.info(p)));
   return combineLatest(presence$, notifySetting$).pipe(
     map(([presence, notify]): boolean => {
       switch (notify) {
@@ -467,9 +474,12 @@ function observeNotifiable(discordClient: discord.Client, tenant: Tenant, discor
   );
 }
 
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM!!!!');
-  await tryToFlushInputObservables();
-  process.exit(0);
-});
 
+fromEvent(process, 'SIGINT').pipe(
+  first()
+).subscribe(async () => {
+  console.log('SIGINT!!!!');
+  await tryToFlushInputObservables();
+  logger.info(`Active observers after flush attempt: ${getObserverCountRepr()}`);
+  process.exit();
+});

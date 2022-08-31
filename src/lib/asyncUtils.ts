@@ -1,6 +1,5 @@
 import {
   BehaviorSubject,
-  concatMap,
   EMPTY,
   from,
   Observable,
@@ -8,7 +7,10 @@ import {
   of, Subject
 } from 'rxjs';
 import {
+  share,
   first,
+  concatMap,
+  startWith,
   tap,
   mergeAll,
   scan,
@@ -157,38 +159,54 @@ export function trackUnifiedState<T>(predicates: boolean[]) {
 }
 
 export function scanChangesToMap<K, T>(getKey: (elt: T) => K) {
-  return (o: Observable<ChangeLike<T>>): Observable<ReadOnlyMap<K, T>> =>
-    o.pipe(
-      scan((map, change) => {
+  return (o: Observable<ChangeLike<T>>): Observable<ReadOnlyMap<K, T>> => {
+    const eltMap = new Map<K, T>();
+    return o.pipe(
+      map((change) => {
         let changed = false;
         switch (change.type) {
           case 'added':
           case 'updated':
-            map.set(getKey(change.elt), change.elt);
+            eltMap.set(getKey(change.elt), change.elt);
+            changed = true;
             break;
           case 'removed':
-            map.delete(getKey(change.elt));
+            eltMap.delete(getKey(change.elt));
+            changed = true;
             break;
         }
-        return map;
-      }, new Map<K, T>())
+        return (changed) ? eltMap : null;
+      }, new Map<K, T>()),
+      filter(isNonNulled),
+      startWith(eltMap),
+      share()
     );
+  };
 }
 
 export function scanChangesToSet<T>() {
-  return (o: Observable<ChangeLike<T>>): Observable<Set<T>> =>
-    o.pipe(scan((map, change) => {
-      switch (change.type) {
-        case 'added':
-        case 'updated':
-          map.add(change.elt);
-          break;
-        case 'removed':
-          map.delete(change.elt);
-          break;
-      }
-      return map;
-    }, new Set<T>()));
+  return (o: Observable<ChangeLike<T>>): Observable<Set<T>> => {
+    const eltSet = new Set<T>();
+    return o.pipe(
+      map((change) => {
+        let changed = false;
+        switch (change.type) {
+          case 'added':
+            eltSet.add(change.elt);
+            changed = true;
+            break;
+          case 'removed':
+            eltSet.delete(change.elt);
+            changed = true;
+            break;
+        }
+        return changed ? eltSet : null;
+      }),
+      filter(isNonNulled),
+      startWith(eltSet),
+      share(),
+    );
+  };
 }
 
 export function trackSet<T>() {
@@ -216,7 +234,7 @@ export function trackSet<T>() {
     }));
 }
 
-type ChangeLike<T> = Change<T> | TimedChange<T>;
+export type ChangeLike<T> = Change<T> | TimedChange<T>;
 
 export function mapChange<T, O>(mapper: (elt: T) => O) {
   return (o: Observable<ChangeLike<T>>): Observable<ChangeLike<O>> =>
@@ -267,11 +285,11 @@ export class ChangeError<T> extends Error {
   }
 }
 
-export function auditChanges<T>(getKey: (elt: T) => string) {
-  return (o: Observable<ChangeLike<T>>): Observable<ChangeLike<T>> => {
+export function auditChanges<T, C extends ChangeLike<T>>(getKey: (elt: T) => string) {
+  return (o: Observable<C>): Observable<C> => {
     const keys = new Set<string>();
     return o.pipe(
-      tap((change) => {
+      map((change) => {
         const key = getKey(change.elt);
         switch (change.type) {
           case 'added':
@@ -279,11 +297,41 @@ export function auditChanges<T>(getKey: (elt: T) => string) {
             keys.add(key);
             break;
           case 'removed':
-            if (!keys.has(key)) throw new ChangeError(`Removed non existant element with key ${key}`, change);
+            if (!keys.has(key)) throw new ChangeError(`Removed non existent element with key ${key}`, change);
             keys.delete(key);
             break;
         }
+        return change;
       })
+    );
+  };
+}
+
+
+export function ignoreRedundantChange<T, K, C extends ChangeLike<T>>(getKey: (elt: T) => K) {
+  return (o: Observable<C>): Observable<C> => {
+    const keys = new Set<K>();
+    return o.pipe(
+      map((change): C | null => {
+        const key = getKey(change.elt);
+        const keySeen = keys.has(key);
+        switch (change.type) {
+          case 'added': {
+            if (keySeen) return null;
+            keys.add(key);
+            return change;
+          }
+          case 'removed': {
+            if (!keySeen) return null;
+            keys.delete(key);
+            return change;
+          }
+          case 'updated': {
+            return change;
+          }
+        }
+      }),
+      filter(isNonNulled)
     );
   };
 }

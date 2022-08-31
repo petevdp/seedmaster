@@ -26,12 +26,14 @@ import {
   mergeMap,
   share,
   switchMap,
+  tap,
   withLatestFrom
 } from 'rxjs/operators';
 import { Seeder, SeedSessionLog, Server, Tenant } from './__generated__';
 import { addSubToMaster, registerInputObservable } from './cleanup';
 import { config } from './config';
 import * as schema from './db';
+import { seed_session_log } from './db';
 import {
   editServerSeedMessageMapName,
   editServerSeedMessagePlayerCount,
@@ -39,6 +41,7 @@ import {
   seedSessionStart,
   serverSeedMessage
 } from './discordComponents';
+import { logger, ppObj } from './globalServices/logger';
 import {
   accumulateMap,
   Change,
@@ -54,6 +57,7 @@ import {
 } from './lib/asyncUtils';
 import { observeMessageReactions } from './lib/discordUtils';
 import { isNonNulled } from './lib/typeUtils';
+import { EndReason } from './manageSeeders';
 import {
   MessageWithRole,
   PlayerWithDetails,
@@ -89,13 +93,13 @@ export function setupServer(server: Server,
     const getResource = () => queryGameServer(server.host, server.query_port);
     const sub: BehaviorSubject<GameDig.QueryResult> = new BehaviorSubject(await getResource());
     const updates = interval(10000).pipe(switchMap(async () => getResource()), registerInputObservable());
-    addSubToMaster(sub);
+    addSubToMaster(sub, 'deferredGameServerUpdate');
     return sub;
   })();
 
   const activePlayer$: Observable<Change<PlayerWithDetails>> = (function trackAndPersistActivePlayers() {
     const playerMtx = new Mutex();
-    return observeSquadServer(server).pipe(
+    const o = observeSquadServer(server).pipe(
       concatMap(async (playerChange): Promise<Change<PlayerWithDetails> | null> => {
         const steamId = BigInt(playerChange.elt.steamID);
 
@@ -128,11 +132,16 @@ export function setupServer(server: Server,
           }
         }
       }),
-      filter(isNonNulled)
+      filter(isNonNulled),
+      tap(change => logger.info(`${change.type} ${change.elt.name} (${change.elt.steam_id})`, change)),
+      share()
     );
+    addSubToMaster(o, 'trackAndPersistActivePlayers');
+    return o;
   })();
   const activePlayers = new Map<bigint, PlayerWithDetails>();
-  addSubToMaster(activePlayer$, { next: accumulateMap(activePlayers, player => player.steam_id) });
+  addSubToMaster(activePlayer$, 'accumulateActivePlayers', { next: accumulateMap(activePlayers, player => player.steam_id) });
+  addSubToMaster(activePlayer$, 'countActivePlayers', { next: () => logger.info(`num active players: ${activePlayers.size}`) });
 
   type MessageChange = ResourceChange<{ options: MessageOptions; role: ServerMessageRole }, string, { options: MessageEditOptions; role: ServerMessageRole }, Message>;
   const {
@@ -178,7 +187,7 @@ export function setupServer(server: Server,
       }
     }
 
-    async function removeManagedMessages(messageId: bigint) {
+    async function removeManagedMessage(messageId: bigint) {
       const mutex = (await messageMutexesDeferred).get(messageId);
       if (!mutex) {
         throw new Error('trying to delete message that is not tracked');
@@ -213,8 +222,8 @@ export function setupServer(server: Server,
         role: row.role
       })));
       const msgMap = new Map(messages.map(elt => [BigInt(elt.msg.id), elt]));
-      const msgMtx = new Map(messages.map(elt => [BigInt(elt.msg.id), new Mutex()]))
-      messageMutexesDeferred.resolve(msgMtx)
+      const msgMtx = new Map(messages.map(elt => [BigInt(elt.msg.id), new Mutex()]));
+      messageMutexesDeferred.resolve(msgMtx);
       serverMessagesDeferred.resolve(msgMap);
     })();
 
@@ -222,7 +231,7 @@ export function setupServer(server: Server,
     return {
       sendManagedMessage,
       editManagedMessage,
-      removeManagedMessage: removeManagedMessages,
+      removeManagedMessage,
       serverMessagesDeferred: serverMessages
     };
   })();
@@ -339,11 +348,15 @@ export function setupServer(server: Server,
         mergeMap(async ([players, seeders]): Promise<Change<SeedSessionLog> | null> => {
           const uniquePlayers = new Set([...players.keys(), ...seeders.keys()]);
 
-          const adjustedCounts = server.player_threshold_coefficient * players.size + server.seeder_threshold_coefficient * seeders.size;
-          const inStartThreshold = server.seed_start_threshold >= adjustedCounts;
-          const inFailedThreshold = server.seed_failed_threshold <= adjustedCounts;
+          const adjustedPlayerCount = server.player_threshold_coefficient * players.size;
+          const adjustedSeederCount = server.seeder_threshold_coefficient * seeders.size;
+          const adjustedCounts = adjustedSeederCount + adjustedPlayerCount;
+
+          const inStartThreshold = server.seed_start_threshold <= adjustedCounts;
+          const inFailedThreshold = server.seed_failed_threshold >= adjustedCounts;
           const hasSuccessPlayerCount = uniquePlayers.size >= server.seed_success_player_count;
           const inActiveSession = activeSessionId !== null;
+          let change: Change<SeedSessionLog> | null = null;
           if (!inActiveSession && inStartThreshold) {
             await activeSessionMtx.acquire();
             let insertedSessionLog: SeedSessionLog;
@@ -357,10 +370,10 @@ export function setupServer(server: Server,
             }
 
             activeSessionId = insertedSessionLog!.id;
-            return {
+            change = {
               elt: insertedSessionLog,
               type: 'added'
-            } as Change<SeedSessionLog>;
+            };
           }
           if (inActiveSession && inFailedThreshold) {
             let updatedSessionLog: SeedSessionLog;
@@ -374,7 +387,7 @@ export function setupServer(server: Server,
               activeSessionMtx.release();
             }
             activeSessionId = null;
-            return ({
+            change = ({
               elt: updatedSessionLog,
               type: 'removed'
             });
@@ -391,13 +404,27 @@ export function setupServer(server: Server,
               activeSessionMtx.release();
             }
             activeSessionId = null;
-            return ({
+            change = {
               elt: updatedSessionLog,
               type: 'removed'
-            });
+            };
           }
 
-          return null;
+          const data = ({
+            uniquePlayers: uniquePlayers.size,
+            activePlayers: players.size,
+            activeSeeders: seeders.size,
+            adjustedPlayerCount,
+            adjustedSeederCount,
+            combinedCounts: adjustedCounts,
+            differenceToStartThreshold: server.seed_start_threshold - adjustedCounts,
+            differenceToFailedThreshold: server.seed_failed_threshold - adjustedCounts,
+            differenceToEnd: server.seed_success_player_count - uniquePlayers.size
+          });
+          logger.info(`Tested session: ${ppObj(data)}`);
+          logger.info(`session change outcome: ${change?.type || 'nothing'} ${ppObj(change || '')}`, change || 'nothing');
+
+          return change;
         }),
         filter(isNonNulled),
         share()
@@ -405,30 +432,35 @@ export function setupServer(server: Server,
     })();
 
     const activeSeedSessionSubject = new BehaviorSubject<SeedSessionLog | null>(null);
-    {
-      const activeSeedSession$ = seedSession$.pipe(map(c => c.type === 'added' ? c.elt : null));
-      addSubToMaster(activeSeedSession$, activeSeedSessionSubject);
-    }
+    addSubToMaster(seedSession$.pipe(changeOfType('added')), 'seedSession', activeSeedSessionSubject);
 
+    // manage completeion of seed sessions
+    addSubToMaster(from(seedSession$.toPromise().finally(async () => {
+      const session = activeSeedSessionSubject.value;
+      if (!session) return;
+      await seed_session_log(db).update({ id: session.id }, {
+        end_reason: EndReason.Error,
+        end_time: new Date()
+      });
+      logger.warn('Closed off active seed session due to unforseen error');
+    })), 'ManageCompletionOfSeedSessions');
 
     (function updateDisplayedServerDetails() {
       const msgMutex: Mutex = new Mutex();
 
-
       (function updateDisplayedMapName() {
-        addSubToMaster(flattenDeferred(deferredGameServerUpdate$), {
+        addSubToMaster(flattenDeferred(deferredGameServerUpdate$), 'updateDisplayedMapName', {
           next: (gameServer) =>
             msgMutex.runExclusive(async () => {
               const msg = await mainServerMessageDeferred;
               const options = editServerSeedMessageMapName(msg, gameServer.map);
               options && editManagedMessage(BigInt(msg.id), options);
             })
-
         });
       })();
 
       (function updateDisplayedPlayerCount() {
-        addSubToMaster(activePlayer$, {
+        addSubToMaster(activePlayer$, 'updateDisplayedPlayerCount', {
           next: () =>
             msgMutex.runExclusive(async () => {
               const msg = await mainServerMessageDeferred;
@@ -449,7 +481,7 @@ export function setupServer(server: Server,
           const msg = await sendManagedMessage(options, ServerMessageRole.SessionStart);
           generatedMessages.add(BigInt(msg.id));
         })
-      ));
+      ), 'newSeedSession');
 
 
       addSubToMaster(activePlayer$.pipe(
@@ -463,11 +495,11 @@ export function setupServer(server: Server,
           const msg = await sendManagedMessage(msgOptions, ServerMessageRole.PlayerJoined);
           generatedMessages.add(BigInt(msg.id));
         })
-      ));
+      ), 'addedSeedSession');
 
       addSubToMaster(seedSession$.pipe(
         changeOfType('removed')
-      ), {
+      ), 'removedSeedSessions', {
         next: async () => {
           await Promise.all([...generatedMessages.values()].map(async id => {
             await removeManagedMessage(id);
@@ -497,7 +529,7 @@ export function setupServer(server: Server,
         share()
       );
     })();
-    addSubToMaster(notifiedSeeder$);
+    addSubToMaster(notifiedSeeder$, 'notifiedSeeder');
 
 
     (function trackNonResponsiveSeeders() {
@@ -506,7 +538,7 @@ export function setupServer(server: Server,
           return timer(server.seeder_max_response_time).toPromise().then(() => seeder);
         })
       );
-      addSubToMaster(nonResponsive$, notAttendingSeederSubject);
+      addSubToMaster(nonResponsive$, 'nonResponsiveSeeders', notAttendingSeederSubject);
     })();
   })();
 

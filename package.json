@@ -30,6 +30,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@base2/pretty-print-object": "^1.0.2",
     "@bitauth/libauth": "^1.17.1",
     "@databases/pg": "^5.4.1",
     "@databases/pg-schema-cli": "^4.3.0",

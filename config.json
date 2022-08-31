@@ -1,15 +1,16 @@
 {
   "guild_id": "465971449954304000",
   "shim_squadjs": {
-    "starting_players": [],
+    "players": "./fixtures/players.json",
+    "starting_count": 5,
     "port": 2000
   },
   "discord_client_id": "1011684234655694858",
   "seeding_channel_id": "1011993778787201125",
   "seeding_role": "Seeder",
-  "seeder_threshold_coefficient": 0.5,
+  "seeder_threshold_coefficient": 1,
   "player_threshold_coefficient": 1,
-  "seed_start_threshold": 10,
+  "seed_start_threshold": 7,
   "seed_failed_threshold": 5,
   "seed_success_player_count": 40,
   "seeder_max_response_time": "3 minutes",

@@ -1,11 +1,11 @@
 import * as t from 'io-ts';
 
 const RawPlayer = t.type({
-  playerID: t.string,
+  // playerID:  t.string,
   steamID: t.string,
   name: t.string,
-  teamID: t.string,
-  squadID: t.string
+  // teamID: t.string,
+  // squadID: t.string
 });
 export type RawPlayer = t.TypeOf<typeof RawPlayer>;
 
@@ -30,7 +30,8 @@ export const ConfigCodec = t.type({
   seed_success_player_count: t.number,
   seeder_max_response_time: t.string,
   shim_squadjs: t.union([t.undefined, t.type({
-    starting_players: t.array(RawPlayer),
+    players: t.union([t.string, t.array(RawPlayer)]),
+    starting_count: t.number,
     port: t.number
   })])
 });

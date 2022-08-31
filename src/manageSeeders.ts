@@ -11,7 +11,7 @@ export type SeedSession = {
   server_id: number;
 }
 
-export enum EndReason { LEFT, COMPLETED }
+export enum EndReason { LEFT, COMPLETED, Error = 2}
 
 export type TrackedSeedSession = Seeder[];
 
