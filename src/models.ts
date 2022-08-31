@@ -1,4 +1,6 @@
-import { Seeder } from './__generated__';
+import { Player, Seeder } from './__generated__';
+import { RawPlayer } from './config/Config';
+import { Message } from 'discord.js';
 
 export type SeedAttempt = {
   readonly attemptId: string;
@@ -18,9 +20,7 @@ export type SeederResponse = {
   readonly createdAt: Date;
 };
 
-type Config = {
-  readonly seedChannel: string;
-};
+export type PlayerWithDetails = Player & Omit<RawPlayer, 'steamID' | 'playerID'>
 
 
 export enum NotifyWhen {
@@ -30,7 +30,18 @@ export enum NotifyWhen {
   Never
 }
 
-export type NotifyStatus = {
-  seeder: Seeder;
-  shouldNotify: boolean;
+
+export enum SeedSessionEndReason {
+  Success = 0,
+  Failure = 1,
+  Aborted = 2
 }
+
+
+export enum ServerMessageRole {
+  Main ,
+  SessionStart,
+  PlayerJoined,
+}
+
+export type MessageWithRole = {msg: Message; role: ServerMessageRole};

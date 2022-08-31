@@ -7,11 +7,12 @@ import {
   Subscription,
   Unsubscribable
 } from 'rxjs';
-import { mapTo, takeUntil, filter } from 'rxjs/operators';
-import { Future } from './asyncUtils';
+import { mapTo, takeUntil, filter, tap, catchError } from 'rxjs/operators';
+import { Future } from './lib/asyncUtils';
 import { setTimeout } from 'timers/promises';
 
 import minutesToMilliseconds from 'date-fns/minutesToMilliseconds';
+import { logger } from './globalServices/logger';
 
 const flush$ = new Future<void>();
 const masterSubject = new Subject<any>();
@@ -26,28 +27,44 @@ export function registerInputObservable<T>() {
   };
 }
 
-export function tryToFlushInputObservables(): Promise<void> {
+export function tryToFlushInputObservables(): Promise<boolean> {
+  logger.info('attempting to flush streams, winding down...');
   flush$.resolve();
   const abortTime = setTimeout(minutesToMilliseconds(15));
+
+
   return subRefCount
     .pipe(
       filter(refCount => refCount === 0),
-      mapTo(undefined),
-      takeUntil(abortTime)
+      mapTo(true),
+      takeUntil(abortTime.then(() => false)),
+      tap((succeeded) => succeeded ? logger.info('successfully flushed streams') : logger.info('flush attempt timed out, aborting'))
     )
-    .toPromise();
+    .toPromise() as Promise<boolean>;
 }
 
 let subRefCount = new BehaviorSubject<number>(0);
 
-export function addSubToMaster<T>(o: Observable<T>, observer: Partial<Observer<T>> | null = null) {
+type ObserverNoError<T> = Omit<Partial<Observer<T>>, 'error'>;
+
+/**
+ * tracks how many observables passed to it are still open, and provides top level error logging and handling
+ * @param observable
+ * @param observer
+ */
+export function addSubToMaster<T>(observable: Observable<T>, observer: ObserverNoError<T>  | null = null) {
   subRefCount.next(subRefCount.value + 1);
-  masterSub.add(o.subscribe({
+  const errorHandledObservable = observable.pipe(
+    // catchError((err, o) => {
+    //   logger.error(err);
+    //   return o;
+    // })
+  );
+  masterSub.add(errorHandledObservable.subscribe({
     complete: () => {
       observer?.complete && observer.complete();
       subRefCount.next(subRefCount.value - 1);
     },
-    next: (elt) => observer?.next && observer.next(elt),
-    error: err => observer?.error && observer.error(err)
+    next: (elt) => observer?.next && observer.next(elt)
   }));
 }

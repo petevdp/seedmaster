@@ -9,18 +9,21 @@ import {
 } from 'rxjs';
 import {
   first,
+  tap,
   mergeAll,
   scan,
   toArray,
   combineLatestAll,
-  map
+  map,
+  distinctUntilChanged,
+  filter
 } from 'rxjs/operators';
-import { Change, getScanned, TimedChange } from './manageSeeders';
-import { ReadOnlyMap } from './typeUtils';
+import { isNonNulled, isTruthy, ReadOnlyMap } from './typeUtils';
 
 
 type Resolve<T> = (value: (T | PromiseLike<T>)) => void;
 type Reject = (reason?: any) => void;
+
 
 export class AlreadyFulfilledError extends Error {
   constructor() {
@@ -31,12 +34,14 @@ export class AlreadyFulfilledError extends Error {
 /**
  * A Promise that can be resolved or rejected externally
  */
-export class Future<T> implements PromiseLike<T> {
+export class Future<T> implements Promise<T> {
   public resolve: Resolve<T>;
   public reject: Reject;
   public fulfilled: boolean = false;
   private promise: Promise<T>;
-  public then: PromiseLike<T>['then'];
+  public then: Promise<T>['then'];
+  public catch: Promise<T>['catch'];
+  public finally: Promise<T>['finally'];
 
 
   constructor() {
@@ -45,9 +50,10 @@ export class Future<T> implements PromiseLike<T> {
 
     this.promise = new Promise(
       (resolve, reject) => {
-      _resolve = resolve;
-      _reject = reject;
-    });
+        _resolve = resolve;
+        _reject = reject;
+      });
+
 
     this.resolve = (value) => {
       if (this.fulfilled) throw new AlreadyFulfilledError();
@@ -58,13 +64,29 @@ export class Future<T> implements PromiseLike<T> {
       _reject(value);
     };
 
-    this.then = (...args) =>  this.promise.then(...args);
+    this.then = ((...args: any[]) => this.promise.then(...args)) as typeof this.promise.then;
+    this.catch = ((...args: any[]) => this.promise.catch(...args)) as typeof this.promise.catch;
+    this.finally = ((...args: any[]) => this.promise.finally(...args)) as typeof this.promise.finally;
   }
+
+  get [Symbol.toStringTag]() {
+    return 'FUTURREEEEEE WOOOO SPOOOOOKYYYY';
+  }
+
 }
+
 
 // export type DeferredSubject<T> = Promise<Subject<T>>;
 export type DeferredBehaviorSubject<T> = Promise<BehaviorSubject<T>>;
 export type FutureBehaviorSubject<T> = Future<BehaviorSubject<T>>;
+
+
+export type Change<T> = {
+  elt: T;
+  type: 'added' | 'removed' | 'updated';
+}
+
+export type TimedChange<T> = Change<T> & { time: Date };
 
 export function flattenDeferred<T, O extends Observable<T>>(promise: Promise<O>): O {
   return from(promise).pipe(mergeAll()) as unknown as O;
@@ -136,18 +158,21 @@ export function trackUnifiedState<T>(predicates: boolean[]) {
 
 export function scanChangesToMap<K, T>(getKey: (elt: T) => K) {
   return (o: Observable<ChangeLike<T>>): Observable<ReadOnlyMap<K, T>> =>
-    o.pipe(scan((map, change) => {
-      switch (change.type) {
-        case 'added':
-        case 'updated':
-          map.set(getKey(change.elt), change.elt);
-          break;
-        case 'removed':
-          map.delete(getKey(change.elt));
-          break;
-      }
-      return map;
-    }, new Map<K, T>()));
+    o.pipe(
+      scan((map, change) => {
+        let changed = false;
+        switch (change.type) {
+          case 'added':
+          case 'updated':
+            map.set(getKey(change.elt), change.elt);
+            break;
+          case 'removed':
+            map.delete(getKey(change.elt));
+            break;
+        }
+        return map;
+      }, new Map<K, T>())
+    );
 }
 
 export function scanChangesToSet<T>() {
@@ -204,3 +229,87 @@ export function getElt<T>(change: ChangeLike<T>): T {
 
 export function noOP() {
 }
+
+export function changeOfType<T>(changeType: Change<T>['type']) {
+  return (o: Observable<Change<T>>): Observable<T> =>
+    o.pipe(
+      map(change => changeType === change.type ? change.elt : null),
+      filter(isNonNulled)
+    );
+
+}
+
+export function toChange<T>(type: Change<T>['type']) {
+  return (elt: T): Change<T> => ({
+    type,
+    elt
+  });
+}
+
+export function countEntities<T>(getKey: (elt: T) => string) {
+  return (o: Observable<Change<T>>): Observable<number> => {
+    return o.pipe(
+      auditChanges(getKey),
+      scan((count, change) => {
+        if (change.type === 'added') return count + 1;
+        if (change.type === 'removed') return count - 1;
+        return count;
+      }, 0),
+      distinctUntilChanged()
+    );
+  };
+}
+
+
+export class ChangeError<T> extends Error {
+  constructor(msg: string, change: ChangeLike<T>) {
+    super(msg);
+  }
+}
+
+export function auditChanges<T>(getKey: (elt: T) => string) {
+  return (o: Observable<ChangeLike<T>>): Observable<ChangeLike<T>> => {
+    const keys = new Set<string>();
+    return o.pipe(
+      tap((change) => {
+        const key = getKey(change.elt);
+        switch (change.type) {
+          case 'added':
+            if (keys.has(key)) throw new ChangeError(`Added Duplicate element with key ${key}`, change);
+            keys.add(key);
+            break;
+          case 'removed':
+            if (!keys.has(key)) throw new ChangeError(`Removed non existant element with key ${key}`, change);
+            keys.delete(key);
+            break;
+        }
+      })
+    );
+  };
+}
+
+export type AddResource<T> = {
+  type: 'added';
+  elt: T;
+}
+
+export type UpdateResource<K, E, R> = {
+  type: 'updated';
+  edit: (elt: R) => E;
+  key: K;
+};
+
+export type RemoveResource<K> = {
+  type: 'removed';
+  key: K;
+};
+
+
+export type ResourceChange<T, K, E, R> =
+  AddResource<T>
+  | UpdateResource<K, E, R>
+  | RemoveResource<K>
+
+// function filterResourceChangeType<T,K,E>(type: ResourceChange<T,K,E>['type']) {
+//   return (o: Observable<>)
+// }

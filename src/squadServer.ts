@@ -6,15 +6,9 @@ import WebSocket from 'ws';
 import { Server } from './__generated__';
 import { config } from './config';
 import { registerInputObservable } from './cleanup';
-import { Change, TimedChange } from './manageSeeders';
-
-export type RawPlayer = {
-  playerID: string;
-  steamID: string;
-  name: string;
-  teamID: string;
-  squadID: string | null;
-};
+import { RawPlayer } from './config/Config';
+import { logger } from './globalServices/logger';
+import { Change, TimedChange } from './lib/asyncUtils';
 
 
 type SquadJSMessage = { time: Date; } & ({
@@ -43,8 +37,8 @@ export async function queryGameServer(host: string, query_port: number) {
   return res;
 }
 
-export function getServerPlayerChange$(server: Server): Observable<TimedChange<RawPlayer>> {
-  if (config.shim_squadjs) {
+export function observeSquadServer(server: Server): Observable<TimedChange<RawPlayer>> {
+  if (!!config.shim_squadjs) {
     return new Observable<TimedChange<RawPlayer>>((s) => {
       let players: Map<string, RawPlayer> = new Map();
       for (let player of config.shim_squadjs!.starting_players) {
@@ -53,7 +47,6 @@ export function getServerPlayerChange$(server: Server): Observable<TimedChange<R
       const app = express();
       app.use(express.json());
       app.post('/players', (req, res) => {
-        console.log({ postedPlayer: req.body });
         const player = req.body as RawPlayer;
         players.set(player.steamID, player);
         // TODO: format dates to match the actual logs
@@ -62,24 +55,23 @@ export function getServerPlayerChange$(server: Server): Observable<TimedChange<R
           elt: player,
           time: new Date()
         });
-        res.send(201);
+        res.sendStatus(201);
       });
       app.delete('/players/:id', (req, res) => {
-        console.log({ deletedPlayer: req.params.id });
         const player = players.get(req.params.id);
         if (!player) {
-          res.send(404);
+          res.sendStatus(404);
           return;
         }
         players.delete(req.params.id);
         const time = new Date();
         s.next({ type: 'removed', time, elt: player });
-        res.send(200);
+        res.sendStatus(200);
       });
 
-      const port = 2000;
+      const port = config.shim_squadjs!.port;
       const server = app.listen(port, () => {
-        console.log('squadjs shim server listening on port ' + 2000);
+        logger.info('squadjs shim server listening on port ' + port);
       });
 
 
@@ -89,11 +81,11 @@ export function getServerPlayerChange$(server: Server): Observable<TimedChange<R
     }).pipe(share(), registerInputObservable());
   }
   return new Observable<TimedChange<RawPlayer>>((s) => {
-    console.log('connecting to websocket ', server.squadjs_ws_addr);
+    logger.info('connecting to websocket ', server.squadjs_ws_addr);
     const ws = new WebSocket(server.squadjs_ws_addr);
 
     function openListener() {
-      console.log('Socket opened with ', server.squadjs_ws_addr);
+      logger.info('Socket opened with ', server.squadjs_ws_addr);
     }
 
     function closeListener() {

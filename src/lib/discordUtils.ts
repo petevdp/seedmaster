@@ -1,20 +1,21 @@
 import discord, {
+  Message,
   MessageReaction,
   PartialMessageReaction,
   PartialUser,
-  User,
-  Message
+  User
 } from 'discord.js';
-import { concatMap, concatAll, mergeMap, map } from 'rxjs/operators';
 import { from, Observable, of } from 'rxjs';
-import { flattenDeferred } from './asyncUtils';
-import { registerInputObservable } from './cleanup';
-import { Change } from './manageSeeders';
+import { concatAll, mergeMap } from 'rxjs/operators';
+import { registerInputObservable } from '../cleanup';
+import { logger } from '../globalServices/logger';
+import { flattenDeferred, Change } from './asyncUtils';
 
 
 export function getInteractionObservable(client: discord.Client) {
 
   return new Observable<discord.Interaction>(s => {
+
     function listener(interaction: discord.Interaction) {
       s.next(interaction);
     }
@@ -87,3 +88,18 @@ export function getPresenceObservable(client: discord.Client): Observable<discor
     };
   }).pipe(registerInputObservable());
 }
+
+// a specific thrown error that occurs during a discord interaction that we want to notify the user about
+export class InteractionError extends Error {
+  constructor(msg: string, rawInteraction: discord.Interaction) {
+    super(msg);
+    let interaction = rawInteraction as discord.ChatInputCommandInteraction<discord.CacheType>;
+    if (interaction.deferred) {
+      interaction.editReply({ content: msg });
+    } else {
+      interaction.reply({ ephemeral: true, content: msg });
+    }
+  }
+}
+
+

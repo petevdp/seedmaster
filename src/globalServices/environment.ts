@@ -1,6 +1,5 @@
 import tsEnv from '@lpgera/ts-env';
 import dotenv from 'dotenv';
-import { Observable } from 'rxjs';
 
 export type Environment = typeof environment;
 
@@ -17,10 +16,6 @@ export const environment = (function retrieveEnvironment() {
   }
   return {
     DISCORD_BOT_TOKEN: tsEnv.stringOrThrow('DISCORD_BOT_TOKEN'),
-
-    // implicitly required by discord api client
-    // DISCORD_CLIENT_ID: BigInt(tsEnv.stringOrThrow('DISCORD_CLIENT_ID')),
-
     STEAM_API_KEY: tsEnv.stringOrThrow('STEAM_API_KEY'),
     NODE_ENV: nodeEnv,
   };

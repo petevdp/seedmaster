@@ -36,6 +36,7 @@ import {
 import {
   catchError,
   share,
+  tap,
   filter,
   concatAll,
   concatMap,
@@ -50,34 +51,42 @@ import {
 } from 'rxjs/operators';
 import SteamAPI from 'steamapi';
 import { Seeder, Server, Tenant } from './__generated__';
-import { accumulateMap, flattenDeferred, getElt } from './asyncUtils';
+import { buildSignupMessageOptions } from './discordComponents';
+import {
+  accumulateMap,
+  flattenDeferred,
+  getElt,
+  Change
+} from './lib/asyncUtils';
 import { config } from './config';
 import { getConfiguredConnectionPool } from './db';
 import * as schema from './db';
 import {
   getInteractionObservable,
-  getPresenceObservable
-} from './discordUtils';
-import { Environment, environment } from './environment';
+  getPresenceObservable, InteractionError
+} from './lib/discordUtils';
+import { Environment, environment } from './globalServices/environment';
 import {
   registerInputObservable,
   addSubToMaster,
   tryToFlushInputObservables
 } from './cleanup';
-import { steamClient } from './globalServices';
-import { InteractionError } from './interactionError';
-import { Change } from './manageSeeders';
+import { logger, steamClient } from './globalServices/logger';
+import { parseTimespan } from './lib/timespan';
 import { NotifyWhen, SeederResponse } from './models';
 import { setupServer } from './setupServer';
 import { v4 as uuidv4 } from 'uuid';
 
+/**
+ * TODO: remove
+ */
 
 async function retrieveConfig() {
   return;
 }
 
 
-function extractEmbedFromSeedMessage(channel: TextChannel, serverId: number) {
+function extEmbedFromSeedMessage(channel: TextChannel, serverId: number) {
   for (let msg of channel.messages.cache.values()) {
     for (let embed of msg.embeds) {
     }
@@ -89,13 +98,13 @@ function getSeedEmbedTitle(server: Server, displayedName: string) {
   return displayedName + ` - (${server.id})`;
 }
 
-
-function main() {
+export default function main() {
+  logger.info('startup');
   let db: ConnectionPool = getConfiguredConnectionPool();
   // const masterSub: Subscription = new Subscription();
 
   let deferredDiscordClient: Promise<discord.Client> = (async () => {
-    const client = new discord.Client({ intents: ['GuildMembers', 'Guilds', 'GuildMessages'] });
+    const client = new discord.Client({ intents: ['GuildMembers', 'Guilds', 'GuildMessages', 'GuildPresences'] });
     await client.login(environment.DISCORD_BOT_TOKEN);
     return client;
   })();
@@ -114,6 +123,9 @@ function main() {
     return instanceTenant;
   })();
 
+  async function getGuild() {
+    return (await deferredDiscordClient).guilds.fetch((await deferredInstanceTenant).guild_id.toString())
+  }
 
   const _observeNotifiable = (discordId: bigint, steamId: bigint, notifySetting$: Observable<NotifyWhen>) => {
     return from(Promise.all([deferredDiscordClient, deferredInstanceTenant])).pipe(
@@ -131,24 +143,25 @@ function main() {
     ];
     const rest = new REST({ version: '10' }).setToken(environment.DISCORD_BOT_TOKEN);
     await rest.put(Routes.applicationGuildCommands(config.discord_client_id.toString(), instanceTenant.guild_id.toString()), { body: commands });
-    console.log('successfully registered application commands');
+    logger.info('successfully registered application commands');
   })();
 
   // create sign up message
-  const signUpFieldIds = {
-    notifyWhen: 'notifyWhen',
-    signUpButton: 'signUp',
-    unregisterButton: 'unregister'
-  };
 
 
-  const serversDeferred = (async () => {
+  const serversDeferred = (async function initServerState() {
     const instanceTenant = await deferredInstanceTenant;
     const serversInDb = await schema.server(db).select({ tenant_id: instanceTenant.id }).all();
     for (let configured of config.servers) {
       await schema.server(db).insertOrUpdate(['id'], {
         ...configured,
-        tenant_id: instanceTenant.id
+        tenant_id: instanceTenant.id,
+        player_threshold_coefficient: config.player_threshold_coefficient,
+        seeder_threshold_coefficient: config.seeder_threshold_coefficient,
+        seed_start_threshold: config.seed_start_threshold,
+        seed_failed_threshold: config.seed_failed_threshold,
+        seed_success_player_count: config.seed_success_player_count,
+        seeder_max_response_time: parseTimespan(config.seeder_max_response_time)
       });
     }
     for (let s of serversInDb) {
@@ -159,29 +172,25 @@ function main() {
     return schema.server(db).select({}).all();
   })();
 
+  const rolesDeferred = (async function ensureRolesCreated() {
+    const guild = await getGuild();
+    const roles = await guild.roles.fetch()
 
-  function buildSignupMessageOptions() {
-    const signUpButton = new ButtonBuilder()
-      .setCustomId(signUpFieldIds.signUpButton)
-      .setLabel('Sign Up')
-      .setStyle(ButtonStyle.Primary);
-
-    const unregisterButton = new ButtonBuilder()
-      .setCustomId(signUpFieldIds.unregisterButton)
-      .setLabel('Unregister')
-      .setStyle(ButtonStyle.Danger);
-
-    const signUpRow = new ActionRowBuilder<ButtonBuilder>().addComponents(signUpButton, unregisterButton);
-    const content = 'Sign up for server seeding to earn rewards!';
-    return {
-      content,
-      components: [signUpRow]
-    };
-  }
-
+    let role = roles.find(r => r.name === config.seeding_role)
+    if (!role) {
+      role = await guild.roles.create({name: config.seeding_role});
+    }
+    return {seeding: role};
+  })();
 
   // discord user ids
   const usersToPromptForSignup$: Subject<bigint> = new Subject();
+  const signUpFieldIds = {
+    notifyWhen: 'notifyWhen',
+    signUpButton: 'signUp',
+    unregisterButton: 'unregister'
+  };
+  const signUpMessages = new Set<string>();
   (function promptSignups() {
     const signupMtx = new Mutex();
     addSubToMaster(usersToPromptForSignup$, {
@@ -200,9 +209,10 @@ function main() {
             .then(guild => guild.members.fetch(discordId.toString()));
 
           const content = 'If you\'d like to be notified when seeding sessions start, please sign up here:';
-          const msgOptions = buildSignupMessageOptions();
-          await member.send({ ...msgOptions, content: content });
+          const msgOptions = buildSignupMessageOptions(signUpFieldIds);
+          const msg = await member.send({ ...msgOptions, content: content });
           await schema.users_prompted_for_signup(db).insert({ discord_id: `"${discordId}" => ${discordId.toString()}` });
+          signUpMessages.add(msg.id);
         } finally {
           signupMtx.release();
         }
@@ -210,8 +220,47 @@ function main() {
     });
   })();
 
+  let deferredSignUpMessage: Promise<discord.Message> = (async function ensureSignupMessageCreated() {
+    const discordClient = await deferredDiscordClient;
+    const [instanceTenant, channel] = await Promise.all([deferredInstanceTenant, discordClient.channels.fetch(config.seeding_channel_id)]);
+    if (!channel!.isTextBased()) {
+      throw new Error('seeding channel should be text based');
+    }
+    const textChannel = channel as discord.TextChannel;
+    const msgOptions = buildSignupMessageOptions(signUpFieldIds);
+
+    if (!instanceTenant.signup_message_id) {
+
+    }
+
+    const persistMessageId = (msg: discord.Message) => schema.tenant(db).update({ id: instanceTenant.id }, { signup_message_id: BigInt(msg.id) });
+    if (!instanceTenant.signup_message_id) {
+      const msg = await textChannel.send(msgOptions);
+      await persistMessageId(msg);
+      return msg;
+    }
+
+    let msg: discord.Message;
+    try {
+      msg = await textChannel.messages.fetch(instanceTenant.signup_message_id.toString());
+    } catch (err: any) {
+      if (err instanceof DiscordAPIError && err.code === 10008) {
+        const msg = await textChannel.send(msgOptions);
+        await persistMessageId(msg);
+        return msg;
+      }
+      throw err;
+    }
+    await persistMessageId(msg);
+    msg = await msg.edit(msgOptions);
+    return msg;
+  })();
+
+  deferredSignUpMessage.then(msg => {
+    signUpMessages.add(msg.id);
+  });
+
   const seeder$: Connectable<Change<Seeder>> = (function trackAndPersistSeeders() {
-    // const [discordClient, signUpMessage] = await Promise.all([deferredDiscordClient, deferredSignUpMessage]);
     const signupModalIds = {
       steamId: 'steamId'
     };
@@ -222,50 +271,16 @@ function main() {
     })));
     let interaction$ = flattenDeferred(deferredDiscordClient.then(c => getInteractionObservable(c)));
 
-    let deferredSignUpMessage: Promise<discord.Message> = (async function ensureSignupMessageCreated() {
-      const discordClient = await deferredDiscordClient;
-      const [instanceTenant, channel] = await Promise.all([deferredInstanceTenant, discordClient.channels.fetch(config.seeding_channel_id)]);
-      if (!channel!.isTextBased()) {
-        throw new Error('seeding channel should be text based');
-      }
-      const textChannel = channel as discord.TextChannel;
-      ;
-      const msgOptions = buildSignupMessageOptions();
 
-      if (!instanceTenant.signup_message_id) {
-
-      }
-
-      const persistMessageId = (msg: discord.Message) => schema.tenant(db).update({ id: instanceTenant.id }, { signup_message_id: BigInt(msg.id) });
-      if (!instanceTenant.signup_message_id) {
-        const msg = await textChannel.send(msgOptions);
-        await persistMessageId(msg);
-        return msg;
-      }
-
-      let msg: discord.Message;
-      try {
-        msg = await textChannel.messages.fetch(instanceTenant.signup_message_id.toString());
-      } catch (err: any) {
-        if (err instanceof DiscordAPIError && err.code === 10008) {
-          const msg = await textChannel.send(msgOptions);
-          await persistMessageId(msg);
-          return msg;
-        }
-        throw err;
-      }
-      await persistMessageId(msg);
-      msg = await msg.edit(msgOptions);
-      return msg;
-    })();
-
-    (function observeSignUpButton() {
+    const submissionModals = new Set<string>();
+    (function observeSignUpButtons() {
+      const contextLogger = logger.child({ context: 'observeSignUpButton' });
       addSubToMaster(
         interaction$,
         {
           // get seeder from interaction
           next: async (rawInteraction) => {
-            if (!rawInteraction.isButton() || rawInteraction.message.id !== (await deferredSignUpMessage).id) return;
+            if (!rawInteraction.isButton() || !signUpMessages.has(rawInteraction.message.id)) return;
             const interaction = rawInteraction as ButtonInteraction;
             if (interaction.customId !== signUpFieldIds.signUpButton) return;
             const alreadyExists = (await schema.seeder(db).count({ discord_id: BigInt(interaction.user.id) })) > 0;
@@ -279,11 +294,13 @@ function main() {
 
             // build modal
             let modalBuilder: ModalBuilder;
+            const modalId = 'sign-up-modal-' + uuidv4();
+
             {
               modalBuilder = new ModalBuilder();
               modalBuilder
                 .setTitle('Sign Up')
-                .setCustomId('sign-up-modal-' + uuidv4());
+                .setCustomId(modalId);
 
 
               const steamIdTextInput = new TextInputBuilder()
@@ -298,8 +315,9 @@ function main() {
               ]);
             }
 
+            contextLogger.info('displaying sign up modal', { user: interaction.user.toJSON() });
             await interaction.showModal(modalBuilder);
-
+            submissionModals.add(modalId);
           }
         }
       );
@@ -307,9 +325,11 @@ function main() {
 
 
     const newSeeder$: Observable<Change<Seeder>> = (function observeSignUpModalSubmission() {
+      const contextLogger = logger.child({ context: 'observeSignUpModalSubmission' });
       return interaction$.pipe(
         mergeMap(async (rawInteraction): Promise<Change<Seeder> | undefined> => {
-          if (!rawInteraction.isModalSubmit() || rawInteraction.message!.id !== (await deferredSignUpMessage).id) return;
+          if (!rawInteraction.isModalSubmit() || !submissionModals.has(rawInteraction.customId)) return;
+          submissionModals.delete(rawInteraction.customId);
           const interaction = rawInteraction as ModalSubmitInteraction;
           const rawSteamId = interaction.fields.getTextInputValue(signupModalIds.steamId).trim();
           const steamId = BigInt(rawSteamId);
@@ -324,12 +344,19 @@ function main() {
 
           await schema.player(db).insertOrIgnore({ steam_id: steamId });
           try {
+            const guild = await getGuild();
+            const user = await guild.members.fetch(interaction.user.id);
+            user.roles.add((await rolesDeferred).seeding)
             const [newSeeder] = await schema.seeder(db).insert({
               steam_id: steamId,
               discord_id: BigInt(interaction.user.id),
               notify_when: 1
             });
-            return { elt: newSeeder, type: 'added' };
+            contextLogger.info(`inserted seeder ${newSeeder.id}`, { newSeeder });
+            return {
+              elt: newSeeder,
+              type: 'added'
+            };
           } catch (err: any) {
             if (err.code === '23505') {
               throw new InteractionError('you\'re already signed up!', interaction);
@@ -437,9 +464,13 @@ function observeNotifiable(discordClient: discord.Client, tenant: Tenant, discor
   const currentPresence$ = discordClient.guilds
     .fetch(tenant.guild_id.toString())
     .then(guild => guild.members.fetch(discordId.toString()))
+    .then(member => member.fetch())
     .then(member => member.presence as discord.Presence);
+  currentPresence$.then(p => {
+    logger.info(p)
+  });
 
-  const presence$ = of(currentPresence$, presenceUpdate$).pipe(mergeAll());
+  const presence$ = of(currentPresence$, presenceUpdate$).pipe(mergeAll(),tap(p => logger.info(p)));
   return combineLatest(presence$, notifySetting$).pipe(
     map(([presence, notify]): boolean => {
       switch (notify) {
@@ -458,9 +489,8 @@ function observeNotifiable(discordClient: discord.Client, tenant: Tenant, discor
 }
 
 process.on('SIGTERM', async () => {
+  logger.info('SIGTERM!!!!');
   await tryToFlushInputObservables();
   process.exit(0);
 });
-
-main();
 
