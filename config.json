@@ -1,18 +1,24 @@
 {
   "guild_id": "465971449954304000",
   "shim_squadjs": {
-    "starting_players": []
+    "starting_players": [],
+    "port": 2000
   },
   "discord_client_id": "1011684234655694858",
   "seeding_channel_id": "1011993778787201125",
+  "seeding_role": "Seeder",
+  "seeder_threshold_coefficient": 0.5,
+  "player_threshold_coefficient": 1,
+  "seed_start_threshold": 10,
+  "seed_failed_threshold": 5,
+  "seed_success_player_count": 40,
+  "seeder_max_response_time": "3 minutes",
   "servers": [
     {
       "id": 1,
       "host": "localhost",
       "query_port": 27165,
-      "squadjs_ws_addr": "ws://localhost:8080",
-      "seed_min_players": 1,
-      "seed_max_players": 2,
+      "squadjs_ws_addr": "ws://localhost:8080"
     }
   ]
 }

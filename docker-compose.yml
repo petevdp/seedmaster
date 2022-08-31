@@ -2,6 +2,17 @@ version: '3.2'
 volumes:
   squad_data:
 services:
+  app:
+    image: .
+    environment:
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
+      DATABASE_URL: ${DATABASE_URL}
+      STEAM_API_KEY: ${STEAM_API_KEY}
+      NODE_ENV: ${NODE_ENV}
+    ports:
+      - 2000:2000
+
   db:
     image: postgres
     volumes:
@@ -15,6 +26,7 @@ services:
       POSTGRES_USER: pguser
       POSTGRES_PASSWORD: pguser
       POSTGRES_DB: pgdb
+
   game_server:
     image: cm2network/squad
     stdin_open: true
