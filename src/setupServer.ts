@@ -30,7 +30,11 @@ import {
   withLatestFrom
 } from 'rxjs/operators';
 import { Seeder, SeedSessionLog, Server, Tenant } from './__generated__';
-import { addSubToMaster, registerInputObservable } from './cleanup';
+import {
+  addMasterSubscriptionSubject,
+  createMasterSubscriptionEntry,
+  registerInputObservable
+} from './cleanup';
 import { config } from './config';
 import * as schema from './db';
 import { seed_session_log } from './db';
@@ -43,10 +47,10 @@ import {
 } from './discordComponents';
 import { logger, ppObj } from './globalServices/logger';
 import {
-  accumulateMap,
+  accumulateMap, BehaviorObservable,
   Change,
   changeOfType,
-  DeferredBehaviorSubject,
+  DeferredBehaviorSubject, DependentBehaviorSubject, DependentSubject,
   flattenDeferred,
   Future,
   getFirstAfterDeferred,
@@ -89,12 +93,12 @@ export function setupServer(server: Server,
 
 
   // fetch game server updates on an interval
-  const deferredGameServerUpdate$: DeferredBehaviorSubject<GameDig.QueryResult> = (async function observeGameServerUpdates() {
+  const deferredGameServerUpdate$: Promise<BehaviorObservable<GameDig.QueryResult>> = (async function observeGameServerUpdates() {
     const getResource = () => queryGameServer(server.host, server.query_port);
-    const sub: BehaviorSubject<GameDig.QueryResult> = new BehaviorSubject(await getResource());
-    const updates = interval(10000).pipe(switchMap(async () => getResource()), registerInputObservable());
-    addSubToMaster(sub, 'deferredGameServerUpdate');
-    return sub;
+    const sub = new BehaviorSubject(await getResource());
+    const pollGameServerUpdate$ = interval(10000).pipe(switchMap(async () => getResource()), registerInputObservable({ context: 'pollGameServerUpdate' }));
+    pollGameServerUpdate$.subscribe(sub);
+    return sub as BehaviorObservable<GameDig.QueryResult>;
   })();
 
   const activePlayer$: Observable<Change<PlayerWithDetails>> = (function trackAndPersistActivePlayers() {
@@ -136,12 +140,12 @@ export function setupServer(server: Server,
       tap(change => logger.info(`${change.type} ${change.elt.name} (${change.elt.steam_id})`, change)),
       share()
     );
-    addSubToMaster(o, 'trackAndPersistActivePlayers');
+    createMasterSubscriptionEntry(o, { context: 'trackAndPersistActivePlayers' });
     return o;
   })();
   const activePlayers = new Map<bigint, PlayerWithDetails>();
-  addSubToMaster(activePlayer$, 'accumulateActivePlayers', { next: accumulateMap(activePlayers, player => player.steam_id) });
-  addSubToMaster(activePlayer$, 'countActivePlayers', { next: () => logger.info(`num active players: ${activePlayers.size}`) });
+  createMasterSubscriptionEntry(activePlayer$, { context: 'accumulateActivePlayers' }, { next: accumulateMap(activePlayers, player => player.steam_id) });
+  createMasterSubscriptionEntry(activePlayer$, { context: 'countActivePlayers' }, { next: () => logger.info(`num active players: ${activePlayers.size}`) });
 
   type MessageChange = ResourceChange<{ options: MessageOptions; role: ServerMessageRole }, string, { options: MessageEditOptions; role: ServerMessageRole }, Message>;
   const {
@@ -152,6 +156,8 @@ export function setupServer(server: Server,
   } = (function manageChannelMessages() {
     const messageMutexesDeferred = new Future<Map<bigint, Mutex>>();
     const serverMessagesDeferred: Future<Map<bigint, MessageWithRole>> = new Future();
+
+    // TODO: better error handling for when message is deleted externally
 
     async function sendManagedMessage(options: MessageOptions, role: ServerMessageRole) {
       const channel = await deferredChannel;
@@ -172,7 +178,7 @@ export function setupServer(server: Server,
     async function editManagedMessage(messageId: bigint, options: MessageEditOptions) {
       const mutex = (await messageMutexesDeferred).get(messageId);
       if (!mutex) {
-        throw new Error('trying to edit message that is not tracked');
+        throw new Error('trying to edit message that is not tracked or does not exist');
       }
       await mutex.acquire();
       try {
@@ -241,7 +247,7 @@ export function setupServer(server: Server,
     const channel = await deferredChannel;
     let msgWithRole = [...(await serverMessagesDeferred).values()].find((elt) => elt.role === ServerMessageRole.Main) || null;
 
-    const gameServerState = await getFirstAfterDeferred(deferredGameServerUpdate$);
+    const gameServerState = (await deferredGameServerUpdate$).value;
     const builtMessage = serverSeedMessage(gameServerState.name, activePlayers.size);
     let msg = msgWithRole?.msg;
     if (msg) {
@@ -313,8 +319,7 @@ export function setupServer(server: Server,
           }
           return;
         }),
-        // remove falsy values
-        concatMap(c => !!c ? of(c) : EMPTY)
+        filter(isNonNulled)
       );
     })());
 
@@ -335,11 +340,16 @@ export function setupServer(server: Server,
     const seedSession$: Observable<Change<SeedSessionLog>> = (function trackAndPersistSeedSessions() {
       let activeSessionId: number | null;
       const activeSessionMtx = new Mutex();
-      const notAttendingChange$ = notAttendingSeederSubject.pipe(map(seeder => ({
-        type: 'removed',
-        elt: seeder
-      } as Change<Seeder>)));
+      const notAttendingChange$ = notAttendingSeederSubject.pipe(
+        registerInputObservable({context: 'notAttendingChange'}),
+        map(seeder => ({
+          type: 'removed',
+          elt: seeder
+        } as Change<Seeder>)));
       const possiblyAttendingSeeder$ = of(notifiableServerSeeder$, notAttendingChange$).pipe(mergeAll());
+
+      createMasterSubscriptionEntry(notifiableServerSeeder$, { context: 'notifiableServerSeeder' });
+      createMasterSubscriptionEntry(notAttendingChange$, { context: 'notAttendingChange$' });
 
       return combineLatest([
         activePlayer$.pipe(scanChangesToMap(elt => elt.steam_id)),
@@ -417,9 +427,9 @@ export function setupServer(server: Server,
             adjustedPlayerCount,
             adjustedSeederCount,
             combinedCounts: adjustedCounts,
-            differenceToStartThreshold: server.seed_start_threshold - adjustedCounts,
-            differenceToFailedThreshold: server.seed_failed_threshold - adjustedCounts,
-            differenceToEnd: server.seed_success_player_count - uniquePlayers.size
+            startThresholdDiff: server.seed_start_threshold - adjustedCounts,
+            failedThresholdDiff: server.seed_failed_threshold - adjustedCounts,
+            successDiff: server.seed_success_player_count - uniquePlayers.size
           });
           logger.info(`Tested session: ${ppObj(data)}`);
           logger.info(`session change outcome: ${change?.type || 'nothing'} ${ppObj(change || '')}`, change || 'nothing');
@@ -431,11 +441,17 @@ export function setupServer(server: Server,
       );
     })();
 
+    createMasterSubscriptionEntry(seedSession$, { context: 'seedSession' });
+
     const activeSeedSessionSubject = new BehaviorSubject<SeedSessionLog | null>(null);
-    addSubToMaster(seedSession$.pipe(changeOfType('added')), 'seedSession', activeSeedSessionSubject);
+    seedSession$.pipe(
+      filter(change => change.type !== 'updated'),
+      map(change => change.type === 'added' ? change.elt : null)
+    ).subscribe(activeSeedSessionSubject);
+
 
     // manage completeion of seed sessions
-    addSubToMaster(from(seedSession$.toPromise().finally(async () => {
+    createMasterSubscriptionEntry(from(seedSession$.toPromise().finally(async () => {
       const session = activeSeedSessionSubject.value;
       if (!session) return;
       await seed_session_log(db).update({ id: session.id }, {
@@ -443,13 +459,13 @@ export function setupServer(server: Server,
         end_time: new Date()
       });
       logger.warn('Closed off active seed session due to unforseen error');
-    })), 'ManageCompletionOfSeedSessions');
+    })), { context: 'ManageCompletionOfSeedSessions' });
 
     (function updateDisplayedServerDetails() {
       const msgMutex: Mutex = new Mutex();
 
       (function updateDisplayedMapName() {
-        addSubToMaster(flattenDeferred(deferredGameServerUpdate$), 'updateDisplayedMapName', {
+        createMasterSubscriptionEntry(flattenDeferred(deferredGameServerUpdate$.then(update => update)), { context: 'updateDisplayedMapName' }, {
           next: (gameServer) =>
             msgMutex.runExclusive(async () => {
               const msg = await mainServerMessageDeferred;
@@ -460,7 +476,7 @@ export function setupServer(server: Server,
       })();
 
       (function updateDisplayedPlayerCount() {
-        addSubToMaster(activePlayer$, 'updateDisplayedPlayerCount', {
+        createMasterSubscriptionEntry(activePlayer$, { context: 'updateDisplayedPlayerCount' }, {
           next: () =>
             msgMutex.runExclusive(async () => {
               const msg = await mainServerMessageDeferred;
@@ -473,18 +489,18 @@ export function setupServer(server: Server,
     (function manageSeedSessionMessages() {
       const generatedMessages = new Set<bigint>();
 
-      addSubToMaster(activeSeedSessionSubject.pipe(
+      createMasterSubscriptionEntry(activeSeedSessionSubject.pipe(
         filter(isNonNulled),
         concatMap(async session => {
-          const serverDetails = await getFirstAfterDeferred(deferredGameServerUpdate$);
+          const serverDetails = (await deferredGameServerUpdate$).value;
           let options = seedSessionStart(serverDetails.name, activePlayers.size, server.seed_success_player_count, session.start_time);
           const msg = await sendManagedMessage(options, ServerMessageRole.SessionStart);
           generatedMessages.add(BigInt(msg.id));
         })
-      ), 'newSeedSession');
+      ), { context: 'seedSessionStarted' });
 
 
-      addSubToMaster(activePlayer$.pipe(
+      createMasterSubscriptionEntry(activePlayer$.pipe(
         changeOfType('added'),
         withLatestFrom(activeSeedSessionSubject),
         mergeMap(async ([player, session]) => {
@@ -495,11 +511,11 @@ export function setupServer(server: Server,
           const msg = await sendManagedMessage(msgOptions, ServerMessageRole.PlayerJoined);
           generatedMessages.add(BigInt(msg.id));
         })
-      ), 'addedSeedSession');
+      ), { context: 'addedSeedSession' });
 
-      addSubToMaster(seedSession$.pipe(
+      createMasterSubscriptionEntry(seedSession$.pipe(
         changeOfType('removed')
-      ), 'removedSeedSessions', {
+      ), { context: 'removedSeedSessions' }, {
         next: async () => {
           await Promise.all([...generatedMessages.values()].map(async id => {
             await removeManagedMessage(id);
@@ -512,11 +528,11 @@ export function setupServer(server: Server,
     const notifiedSeeder$ = (function notifyAvailableSeeders(): Observable<Seeder> {
       const deferredGuild = Promise.all([discordClientDeferred, tenantDeferred]).then(([client, tenant]) => client.guilds.fetch(tenant.guild_id.toString()));
 
-      return activeSeedSessionSubject.pipe(
-        filter(isNonNulled),
+      return seedSession$.pipe(
+        changeOfType('added'),
         withLatestFrom(notifiableServerSeeder$.pipe(scanChangesToMap(seeder => seeder.discord_id))),
         mergeMap(async ([session, seeders]) => {
-          const serverName = (await getFirstAfterDeferred(deferredGameServerUpdate$)).name;
+          const serverName = (await deferredGameServerUpdate$).value.name;
           const sent = [...seeders.values()].map(seeder => deferredGuild
             .then(guild => guild.members.fetch(seeder.discord_id.toString()))
             .then(member => member.send('Time to seed ' + serverName))
@@ -529,16 +545,20 @@ export function setupServer(server: Server,
         share()
       );
     })();
-    addSubToMaster(notifiedSeeder$, 'notifiedSeeder');
+    createMasterSubscriptionEntry(notifiedSeeder$, { context: 'notifiedSeeder' });
 
 
     (function trackNonResponsiveSeeders() {
       const nonResponsive$ = notifiedSeeder$.pipe(
         mergeMap((seeder) => {
-          return timer(server.seeder_max_response_time).toPromise().then(() => seeder);
+          return timer(server.seeder_max_response_time).pipe(registerInputObservable({ context: 'wait for seeder response' })).toPromise().then(() => seeder);
         })
       );
-      addSubToMaster(nonResponsive$, 'nonResponsiveSeeders', notAttendingSeederSubject);
+
+      nonResponsive$.subscribe(notAttendingSeederSubject);
+      nonResponsive$.subscribe({
+        complete: () => {console.log()}
+      })
     })();
   })();
 

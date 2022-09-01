@@ -71,8 +71,11 @@ import {
 import { Environment, environment } from './globalServices/environment';
 import {
   registerInputObservable,
-  addSubToMaster,
-  tryToFlushInputObservables, getObserverCountRepr, getObserverCountRepr$
+  createMasterSubscriptionEntry,
+  tryToFlushInputObservables,
+  getObserverCountRepr,
+  getObserverCountRepr$,
+  addMasterSubscriptionSubject
 } from './cleanup';
 import { logger, steamClient } from './globalServices/logger';
 import { parseTimespan } from './lib/timespan';
@@ -175,7 +178,7 @@ export default function main() {
   const signUpMessages = new Set<string>();
   (function promptSignups() {
     const signupMtx = new Mutex();
-    addSubToMaster(usersToPromptForSignup$, 'promptSignups', {
+    createMasterSubscriptionEntry(usersToPromptForSignup$, { context: 'promptSignups' }, {
       next: async discordId => {
         await signupMtx.acquire();
         try {
@@ -257,9 +260,9 @@ export default function main() {
     const submissionModals = new Set<string>();
     (function observeSignUpButtons() {
       const contextLogger = logger.child({ context: 'observeSignUpButton' });
-      addSubToMaster(
+      createMasterSubscriptionEntry(
         interaction$,
-        'observeSignUpButtons',
+        { context: 'observeSignUpButtons' },
         {
           // get seeder from interaction
           next: async (rawInteraction) => {
@@ -309,7 +312,7 @@ export default function main() {
 
     const newSeeder$: Observable<Change<Seeder>> = (function observeSignUpModalSubmission() {
       const contextLogger = logger.child({ context: 'observeSignUpModalSubmission' });
-      return interaction$.pipe(
+      const o = interaction$.pipe(
         mergeMap(async (rawInteraction): Promise<Change<Seeder> | undefined> => {
           if (!rawInteraction.isModalSubmit() || !submissionModals.has(rawInteraction.customId)) return;
           submissionModals.delete(rawInteraction.customId);
@@ -353,6 +356,7 @@ export default function main() {
         catchError((err, o) => o),
         concatMap(m => !!m ? of(m) : EMPTY)
       );
+      return o;
     })();
     const updatedSeeder$: Observable<Change<Seeder>> = interaction$.pipe(
       mergeMap(async (rawInteraction): Promise<Change<Seeder> | undefined> => {
@@ -387,7 +391,9 @@ export default function main() {
       );
     })();
 
+
     const allSeeder$ = of(existingSeeder$, newSeeder$, removedSeeder$).pipe(concatAll());
+    createMasterSubscriptionEntry(allSeeder$, { context: 'allSeeder$' });
     return connectable(of(allSeeder$, updatedSeeder$).pipe(mergeAll()));
   })();
 
@@ -416,8 +422,8 @@ export default function main() {
   // map tracking all seeders TODO: eventually stop storing all seeders in process memory
   const allSeedersByDiscordId: Map<bigint, Seeder> = new Map();
   const allSeedersBySteamId: Map<bigint, Seeder> = new Map();
-  addSubToMaster(seeder$, 'allSeedersBySteamId', { next: accumulateMap(allSeedersBySteamId, s => s.discord_id) });
-  addSubToMaster(seeder$, 'allSeedersByDiscordId', { next: accumulateMap(allSeedersByDiscordId, s => s.steam_id) });
+  createMasterSubscriptionEntry(seeder$, { context: 'allSeedersBySteamId' }, { next: accumulateMap(allSeedersBySteamId, s => s.discord_id) });
+  createMasterSubscriptionEntry(seeder$, { context: 'allSeedersByDiscordId' }, { next: accumulateMap(allSeedersByDiscordId, s => s.steam_id) });
 
   (function setupServers() {
     serversDeferred.then(servers => {
@@ -435,7 +441,7 @@ export default function main() {
           allSeedersBySteamId
         );
 
-        addSubToMaster(serverSeedSignupAttempt$,'usersToPromptForSignup$', usersToPromptForSignup$);
+        serverSeedSignupAttempt$.subscribe(usersToPromptForSignup$);
       }
 
       logger.info(`Active observers after servers setup: ${getObserverCountRepr()}`);
@@ -474,12 +480,23 @@ function observeNotifiable(discordClient: discord.Client, tenant: Tenant, discor
   );
 }
 
+// ensure SIGINT is emitted properly on windows
+var win32 = process.platform === 'win32';
+if (win32) {
+  var readline = require('readline'),
+    rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
 
-fromEvent(process, 'SIGINT').pipe(
-  first()
-).subscribe(async () => {
-  console.log('SIGINT!!!!');
+  rl.on('SIGINT', function() {
+    process.emit('SIGINT');
+  });
+}
+
+process.on('SIGINT', async () => {
+  logger.info('received SIGINT, winding down...');
   await tryToFlushInputObservables();
-  logger.info(`Active observers after flush attempt: ${getObserverCountRepr()}`);
+  logger.info('Exiting');
   process.exit();
 });

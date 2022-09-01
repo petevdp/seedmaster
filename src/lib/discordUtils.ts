@@ -8,7 +8,6 @@ import discord, {
 import { from, Observable, of } from 'rxjs';
 import { concatAll, mergeMap } from 'rxjs/operators';
 import { registerInputObservable } from '../cleanup';
-import { logger } from '../globalServices/logger';
 import { flattenDeferred, Change } from './asyncUtils';
 
 
@@ -25,7 +24,7 @@ export function getInteractionObservable(client: discord.Client) {
     return () => {
       client.off('interactionCreate', listener);
     };
-  }).pipe(registerInputObservable());
+  }).pipe(registerInputObservable({ context: 'getInteractionObservable' }));
 }
 
 export type ReactionChange = Change<{ reaction: MessageReaction | PartialMessageReaction; userId: bigint }>
@@ -53,7 +52,7 @@ export function getReactionObservable(client: discord.Client) {
       client.off('messageReactionAdd', reactionAddListener);
       client.off('messageReactionRemove', reactionRemoveListener);
     };
-  }).pipe(registerInputObservable());
+  }).pipe(registerInputObservable({ context: 'getReactionObservable' }));
 }
 
 
@@ -69,7 +68,7 @@ export function observeMessageReactions(client: discord.Client, message: Message
     );
   }));
 
-  return of(existingReactions, reactionObservable).pipe(concatAll(), registerInputObservable());
+  return of(existingReactions, reactionObservable).pipe(concatAll(), registerInputObservable({ context: 'observeMessageReactions' }));
 }
 
 
@@ -86,7 +85,7 @@ export function getPresenceObservable(client: discord.Client): Observable<discor
     return () => {
       client.off('presenceUpdate', listener);
     };
-  }).pipe(registerInputObservable());
+  }).pipe(registerInputObservable({ context: 'getPresenceObservable' }));
 }
 
 // a specific thrown error that occurs during a discord interaction that we want to notify the user about

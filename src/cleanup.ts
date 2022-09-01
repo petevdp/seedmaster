@@ -10,6 +10,8 @@ import {
 import {
   mapTo,
   takeUntil,
+  takeWhile,
+  startWith,
   map,
   filter,
   tap,
@@ -26,104 +28,123 @@ import { setTimeout } from 'timers/promises';
 import { v4 as uuidv4 } from 'uuid';
 
 import minutesToMilliseconds from 'date-fns/minutesToMilliseconds';
-import { logger, ppObj } from './globalServices/logger';
+import {
+  logger as baseLogger,
+  LoggerMetadata,
+  ppObj
+} from './globalServices/logger';
 import secondsToMilliseconds from 'date-fns/secondsToMilliseconds';
 import { isNonNulled } from './lib/typeUtils';
 
-const flush$ = new Future<void>();
-const masterSubject = new Subject<any>();
+const flushInputs = new Future<void>();
 
 const masterSub: Subscription = new Subscription();
 
 
 const observerLabel = new Subject<Change<string>>();
-const observerCounts$ = new Subject<Map<string, number>>();
-const observerMap = new Map<string, number>();
+const observerCountsMap$ = new Subject<Map<string, number>>();
+const observerCountsMap = new Map<string, number>();
+const observerCount$ = observerCountsMap$.pipe(map(getObserverCount));
+
+function getObserverCount(map: Map<string, number>) {
+  return [...map.values()].reduce((sum, val) => sum + val);
+}
 
 observerLabel
   .pipe(
     map(change => {
-      if (change.type === 'added' && observerMap.has(change.elt)) {
-        observerMap.set(change.elt, (observerMap.get(change.elt) as number) + 1);
-        return observerMap;
+      if (change.type === 'added' && observerCountsMap.has(change.elt)) {
+        observerCountsMap.set(change.elt, (observerCountsMap.get(change.elt) as number) + 1);
+        return observerCountsMap;
       }
-      if (change.type === 'added' && !observerMap.has(change.elt)) {
-        observerMap.set(change.elt, 1);
-        return observerMap;
+      if (change.type === 'added' && !observerCountsMap.has(change.elt)) {
+        observerCountsMap.set(change.elt, 1);
+        return observerCountsMap;
       }
-      if (change.type === 'removed' && observerMap.has(change.elt)) {
-        observerMap.set(change.elt, (observerMap.get(change.elt) as number) - 1);
-        return observerMap;
+      if (change.type === 'removed' && observerCountsMap.has(change.elt)) {
+        observerCountsMap.set(change.elt, (observerCountsMap.get(change.elt) as number) - 1);
+        return observerCountsMap;
       }
       return null;
     }),
     filter(isNonNulled)
   )
-  .subscribe(observerCounts$);
+  .subscribe(observerCountsMap$);
 
 
 observerLabel.subscribe(change => {
-  logger.info(`observer change: ${change.type} ${change.elt}`, change);
+  baseLogger.info(`observer change: ${change.type} ${change.elt}`, { change });
 });
 
 type ObserverNoError<T> = Omit<Partial<Observer<T>>, 'error'>;
 
-/**
- * tracks how many observables passed to it are still open, and provides top level error logging and handling
- * @param observable
- * @param observer
- */
-export function addSubToMaster<T>(observable: Observable<T>, label: string | null /*= null */, observer: ObserverNoError<T> | null = null) {
-  let labelWithDefault = label || 'anonymous';
+export function addMasterSubscriptionSubject<T>(subject: Subject<T>, meta: LoggerMetadata) {
+  createMasterSubscriptionEntry(subject, meta, subject);
+}
+
+export function createMasterSubscriptionEntry<T>(observable: Observable<T>, meta: LoggerMetadata, observer: Partial<Observer<T> >| null = null) {
+  let labelWithDefault = meta.context ?? 'anonymous';
   observerLabel.next({ type: 'added', elt: labelWithDefault });
   const errorHandledObservable = observable.pipe(
-    // catchError((err, o) => {
-    //   logger.error(err);
-    //   return o;
-    // })
+    catchError((err, o) => {
+      baseLogger.error(err, { ...meta, category: 'masterSub' });
+      return o;
+    })
   );
   masterSub.add(errorHandledObservable.subscribe({
     complete: () => {
       observer?.complete && observer.complete();
       observerLabel.next({ type: 'removed', elt: labelWithDefault });
     },
-    next: (elt) => observer?.next && observer.next(elt)
+    next: (elt) => observer?.next && observer.next(elt),
+    error: err => observer?.error && observer.error(err)
   }));
 }
 
 
 export function getObserverCountRepr(): string {
   const obj: any = {};
-  for (let [label, count] of observerMap.entries())
+  for (let [label, count] of observerCountsMap.entries())
     obj[label] = count;
   return ppObj(obj);
 }
 
 export function getObserverCountRepr$(): Observable<string> {
-  return observerCounts$.pipe(map(getObserverCountRepr));
+  return observerCountsMap$.pipe(map(getObserverCountRepr));
 }
 
-export function registerInputObservable<T>() {
+export function registerInputObservable<T>(metadata: LoggerMetadata) {
   return (observable: Observable<T>): Observable<T> => {
-    const out = observable.pipe(takeUntil(flush$));
-    out.subscribe(masterSubject);
+    const inputObservableLogger = baseLogger.child({
+      ...metadata,
+      category: 'inputObservable'
+    });
+    inputObservableLogger.info(`Subscribed to input observable ${metadata.context}`);
+    const out = observable.pipe(takeUntil(flushInputs));
+    createMasterSubscriptionEntry(out, metadata, { complete: () => inputObservableLogger.info(`Completed input observable ${metadata.context}`) });
     return out;
   };
 }
 
-export function tryToFlushInputObservables(): Promise<boolean> {
+export async function tryToFlushInputObservables(): Promise<boolean> {
+  const logger = baseLogger.child({ context: 'tryToFlushInputObservables' });
   logger.info('attempting to flush streams, winding down...');
-  flush$.resolve();
-  const abortTime = setTimeout(secondsToMilliseconds(5));
+  flushInputs.resolve();
 
-
-  return observerCounts$
+  const leftAfterTimeout = await observerCount$
     .pipe(
-      filter(map => map.size === 0),
-      mapTo(true),
-      takeUntil(abortTime),
-      endWith(false),
-      tap((succeeded) => succeeded ? logger.info('successfully flushed streams') : logger.info('flush attempt timed out, aborting'))
-    )
-    .toPromise() as Promise<boolean>;
+      startWith(getObserverCount(observerCountsMap)),
+      takeWhile(count => count !== 0),
+      takeUntil(setTimeout(secondsToMilliseconds(5)))
+    ).toPromise() as number;
+
+  if (leftAfterTimeout > 0) {
+
+    logger.info('successfully flushed all streams');
+    return true;
+  } else {
+    logger.warn(`flush attempt timed out, (${leftAfterTimeout} observables left)`);
+    logger.warn(`Active observers after flush attempt: ${getObserverCountRepr()}`);
+    return false;
+  }
 }

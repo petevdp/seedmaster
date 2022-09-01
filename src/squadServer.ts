@@ -8,7 +8,7 @@ import { Server } from './__generated__';
 import { registerInputObservable } from './cleanup';
 import { config } from './config';
 import { RawPlayer } from './config/Config';
-import { logger } from './globalServices/logger';
+import { logger as masterLogger } from './globalServices/logger';
 import { auditChanges, Change, TimedChange } from './lib/asyncUtils';
 
 
@@ -39,7 +39,7 @@ export async function queryGameServer(host: string, query_port: number) {
 }
 
 export function observeSquadServer(server: Server): Observable<TimedChange<RawPlayer>> {
-  logger.info('observeSquadServer');
+  const observeSquadLogger = masterLogger.child({context:  'observeSquadServer'});
   if (!!config.shim_squadjs) {
     return new Observable<TimedChange<RawPlayer>>((s) => {
       let players: Map<string, RawPlayer> = new Map();
@@ -110,7 +110,7 @@ export function observeSquadServer(server: Server): Observable<TimedChange<RawPl
 
       const port = config.shim_squadjs!.port;
       const server = app.listen(port, () => {
-        logger.info('squadjs shim server listening on port ' + port);
+        observeSquadLogger.info('squadjs shim server listening on port ' + port);
       });
 
 
@@ -122,15 +122,15 @@ export function observeSquadServer(server: Server): Observable<TimedChange<RawPl
       // ensure all subscribers that subscribe during this synchronous context get all events
       observeOn(asapScheduler),
       share(),
-      registerInputObservable()
+      registerInputObservable(observeSquadLogger.defaultMeta)
     );
   }
   return new Observable<TimedChange<RawPlayer>>((s) => {
-    logger.info('connecting to websocket ', server.squadjs_ws_addr);
+    observeSquadLogger.info('connecting to websocket ', server.squadjs_ws_addr);
     const ws = new WebSocket(server.squadjs_ws_addr);
 
     function openListener() {
-      logger.info('Socket opened with ', server.squadjs_ws_addr);
+      observeSquadLogger.info('Socket opened with ', server.squadjs_ws_addr);
     }
 
     function closeListener() {
@@ -164,5 +164,5 @@ export function observeSquadServer(server: Server): Observable<TimedChange<RawPl
       ws.off('close', closeListener);
       ws.off('message', messageListener);
     };
-  }).pipe(registerInputObservable(), auditChanges<RawPlayer, TimedChange<RawPlayer>>(elt => elt.steamID));
+  }).pipe(registerInputObservable(observeSquadLogger.defaultMeta), auditChanges<RawPlayer, TimedChange<RawPlayer>>(elt => elt.steamID));
 }

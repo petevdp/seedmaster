@@ -4,7 +4,14 @@ import {
   from,
   Observable,
   ObservableInput,
-  of, Subject
+  of,
+  Subject,
+  Subscriber,
+  Subscription,
+  TeardownLogic,
+  Subscribable,
+  Observer,
+  Unsubscribable
 } from 'rxjs';
 import {
   share,
@@ -204,7 +211,7 @@ export function scanChangesToSet<T>() {
       }),
       filter(isNonNulled),
       startWith(eltSet),
-      share(),
+      share()
     );
   };
 }
@@ -358,6 +365,95 @@ export type ResourceChange<T, K, E, R> =
   | UpdateResource<K, E, R>
   | RemoveResource<K>
 
-// function filterResourceChangeType<T,K,E>(type: ResourceChange<T,K,E>['type']) {
-//   return (o: Observable<>)
+
+/**
+ * A subject that relies on its consumers to keep track of 'next' callsites, so it can complete
+ */
+// export class DependentSubject<T> extends Subject<T> {
+//   constructor() {
+//     super();
+//   }
+//
+//   private refCount = 0;
+//
+//   addRef(refDisposedOf: Promise<unknown>) {
+//     this.refCount += 1;
+//     refDisposedOf.then(() => {
+//       this.refCount -= 1;
+//       if (this.refCount <= 0) this.complete();
+//     });
+//   }
+//
+// }
+
+/**
+ * A subject that explicitely tracks its dependant observables, and completes when none are left.
+ * Will only work when dependent observables are using a non-sync scheduler
+ */
+export class DependentSubject<T> {
+  private _subject = new Subject<T>();
+  private observeCount = 0;
+
+  public addDependency(o: Observable<T>) {
+    this.observeCount++;
+
+    const sub =  o.subscribe({
+      next: (elt) => this.subject.next(elt),
+      error: (err) => this.subject.error(err),
+      complete: () => {
+        this.observeCount--;
+        if (this.observeCount === 0) this.subject.complete();
+      }
+    });
+
+
+    this.subject.subscribe({
+      complete: () => sub.unsubscribe()
+    })
+  }
+
+  public get observable () {
+    return this.subject as Observable<T>;
+  }
+
+  protected get subject () {
+    return this._subject;
+  }
+}
+
+export class DependentBehaviorSubject<T> extends DependentSubject<any> {
+  private bSubject: BehaviorSubject<T>;
+
+  constructor(startingValue: T) {
+    super();
+    this.bSubject = new BehaviorSubject(startingValue);
+  }
+
+  public get value() {
+    return this.bSubject.value;
+  }
+
+  protected get subject(): Subject<T> {
+    return this.bSubject;
+  }
+}
+
+
+export interface BehaviorObservable<T> extends Observable<T> {
+  value: T;
+}
+
+
+// export class BehaviorObservable<T> extends Observable<T> {
+//   private bSubject: BehaviorSubject<T>;
+//   constructor(subscribe?: (this: Observable<T>, subscriber: Subscriber<T>) => TeardownLogic, initialValue: T) {
+//     super(subscribe);
+//     this.bSubject = new BehaviorSubject(initialValue);
+//     this.subscribe(this.bSubject);
+//     this.subscribe({complete: () => this.bSubject.unsubscribe()})
+//   }
+//
+//   public get value() {
+//     return this.bSubject;
+//   }
 // }
