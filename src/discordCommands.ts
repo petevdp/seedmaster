@@ -25,6 +25,7 @@ export const commandNames = {
     name: 'sm-configure-server',
     subCommandAdd: 'add'
   },
+  resetMessages: 'sm-reset-messages',
   startModerated: {
     name: 'sm-start-moderated',
     options: {
@@ -41,38 +42,12 @@ export async function registerDiscordCommands(guildId: string, server$: Observab
   const staticCommands = [
     new SlashCommandBuilder()
       .setName(commandNames.configureServer.name)
-      .setDescription('reconfigure an existing server')
-    // .addSubcommand((cmd) => cmd.setName(commandNames.configureServer.subCommandAdd).setDescription('Configure a new server'))
+      .setDescription('reconfigure an existing server'),
+    new SlashCommandBuilder()
+      .setName(commandNames.resetMessages)
+      .setDescription('Resets all messages sent by the bot in the guild')
   ];
 
-  function buildStartModeratedSeedingCommand(servers: ServerWithDetails[]) {
-    return new SlashCommandBuilder()
-      .setName(commandNames.startModerated.name).setDescription('Start a moderated seeding session')
-      .addStringOption(option =>
-        option
-          .setName(commandNames.startModerated.options.server)
-          .setDescription('the server to begin seeding')
-          .setRequired(true)
-          .setChoices(
-            ...servers.map(s => ({ name: s.name, value: s.id.toString() }))
-          )
-      )
-      .addBooleanOption((option) =>
-        option
-          .setName('failure-impossible')
-          .setDescription('make seeding session go on forever unless explicitly stopped')
-      )
-      .addIntegerOption((option) =>
-        option
-          .setName(commandNames.startModerated.options.failureThreshold)
-          .setDescription('the minimum amount of players that need to be in the server by the time the grace period ends')
-      )
-      .addStringOption((option) =>
-        option
-          .setName(commandNames.startModerated.options.gracePeriod)
-          .setDescription(`A grace period time where we can\'t fail seeding (default: ${config.default_grace_period})`)
-      );
-  }
 
   const rest = new REST({ version: '10' }).setToken(environment.DISCORD_BOT_TOKEN);
 
@@ -94,4 +69,33 @@ export async function registerDiscordCommands(guildId: string, server$: Observab
     logger.error(err);
   }
   logger.info('successfully registered application commands');
+}
+
+function buildStartModeratedSeedingCommand(servers: ServerWithDetails[]) {
+  return new SlashCommandBuilder()
+    .setName(commandNames.startModerated.name).setDescription('Start a moderated seeding session')
+    .addStringOption(option =>
+      option
+        .setName(commandNames.startModerated.options.server)
+        .setDescription('the server to begin seeding')
+        .setRequired(true)
+        .setChoices(
+          ...servers.map(s => ({ name: s.name, value: s.id.toString() }))
+        )
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName('failure-impossible')
+        .setDescription('make seeding session go on forever unless explicitly stopped')
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName(commandNames.startModerated.options.failureThreshold)
+        .setDescription('the minimum amount of players that need to be in the server by the time the grace period ends')
+    )
+    .addStringOption((option) =>
+      option
+        .setName(commandNames.startModerated.options.gracePeriod)
+        .setDescription(`A grace period time where we can\'t fail seeding (default: ${config.default_grace_period})`)
+    );
 }

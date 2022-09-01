@@ -7,13 +7,23 @@ import discord, {
   User
 } from 'discord.js';
 import { from, Observable, of, fromEvent } from 'rxjs';
-import { concatAll, map, mergeMap, share, mergeAll, tap } from 'rxjs/operators';
+import {
+  concatAll,
+  map,
+  mergeMap,
+  share,
+  mergeAll,
+  tap,
+  filter
+} from 'rxjs/operators';
 import { registerInputObservable } from '../cleanup';
 import { logger, ppObj } from '../globalServices/logger';
 import { flattenDeferred, Change } from './asyncUtils';
+import { isNonNulled } from './typeUtils';
 
 
 let interaction$: Observable<Interaction> | null = null;
+
 export function getInteractionObservable(client: discord.Client): Observable<Interaction> {
   if (interaction$) return interaction$;
   interaction$ = (fromEvent(client, 'interactionCreate') as Observable<Interaction>).pipe(
@@ -29,6 +39,7 @@ export type MessageReactionListenerArgs = [MessageReaction | PartialMessageReact
 
 
 let reaction$: Observable<ReactionChange> | null = null;
+
 export function getReactionObservable(client: discord.Client): Observable<ReactionChange> {
   if (reaction$) return reaction$;
   const reactionAdd$ = (fromEvent(client, 'messageReactionAdd') as Observable<MessageReactionListenerArgs>)
@@ -51,6 +62,19 @@ export function getReactionObservable(client: discord.Client): Observable<Reacti
       share()
     );
   return reaction$;
+}
+
+
+export function getChatCommandInteraction(discordClient: discord.Client) {
+  const interaction$ = getInteractionObservable(discordClient);
+  return interaction$.pipe(
+    map((interactionRaw) => {
+      if (!interactionRaw.isChatInputCommand()) return null;
+      const interaction = interactionRaw as discord.ChatInputCommandInteraction;
+      return interaction;
+    }),
+    filter(isNonNulled)
+  );
 }
 
 

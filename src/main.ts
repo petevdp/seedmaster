@@ -55,7 +55,7 @@ import {
 } from 'rxjs/operators';
 import SteamAPI from 'steamapi';
 import { Seeder, Server, Tenant } from './__generated__';
-import { registerDiscordCommands } from './discordCommands';
+import { commandNames, registerDiscordCommands } from './discordCommands';
 import { buildSignupMessageOptions } from './discordComponents';
 import {
   accumulateMap,
@@ -67,6 +67,7 @@ import { config } from './config';
 import { getConfiguredConnectionPool } from './db';
 import * as schema from './db';
 import {
+  getChatCommandInteraction,
   getInteractionObservable,
   getPresenceObservable, InteractionError
 } from './lib/discordUtils';
@@ -416,8 +417,40 @@ export default function main() {
   createMasterSubscriptionEntry(seeder$, { context: 'allSeedersBySteamId' }, { next: accumulateMap(allSeedersBySteamId, s => s.discord_id) });
   createMasterSubscriptionEntry(seeder$, { context: 'allSeedersByDiscordId' }, { next: accumulateMap(allSeedersByDiscordId, s => s.steam_id) });
 
+
+  (function handleGenericChatCommands() {
+    const chatCommandInteraction$ = flattenDeferred(deferredDiscordClient.then(c => getChatCommandInteraction(c)));
+
+    // handle reset messages
+    chatCommandInteraction$.pipe(
+      mergeMap(async interaction => {
+        if (interaction.commandName !== commandNames.resetMessages) return;
+        await interaction.reply({ ephemeral: true, content: 'Deleting....' });
+        const guild = await getGuild();
+        const botMember = await guild.members.fetch(config.discord_client_id);
+        const channel = (await guild.channels.fetch(config.seeding_channel_id)) as TextChannel;
+        const messages = await channel!.messages.fetch();
+        await messages.map(async (msg) => {
+          logger.debug(`author: ${msg.author.id} === bot: ${botMember.id}`);
+          if (msg.author.id === botMember.id) {
+            await msg.delete();
+            schema.server_managed_message(db).delete({
+              message_id: BigInt(msg.id),
+              channel_id: BigInt(channel.id)
+            });
+          }
+        });
+        const dmChannel = botMember.user.dmChannel?.fetch();
+        // await interaction.reply({
+        //   ephemeral: true,
+        //   content: 'all bot messages deleted!'
+        // });
+      })
+    ).subscribe();
+  })();
+
   (function setupServers() {
-    serversDeferred.then(servers => {
+    Promise.all([serversDeferred, deferredSignUpMessage]).then(([servers]) => {
       const serverUpdateSubject = new DependentSubject<ServerWithDetails>();
       for (let server of servers) {
         const {
@@ -447,7 +480,6 @@ export default function main() {
   })();
   seeder$.connect();
   logger.info(`Active observers on main end: ${getObserverCountRepr()}`);
-
 
   (function watchForProcessInturrupt() {
     // ensure SIGINT is emitted properly on windows

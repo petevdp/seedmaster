@@ -1,4 +1,5 @@
 import { ConnectionPool } from '@databases/pg';
+import { DiscordAPIError } from '@discordjs/rest';
 import { Mutex } from 'async-mutex';
 import minutesToMilliseconds from 'date-fns/minutesToMilliseconds';
 import discord, {
@@ -73,6 +74,7 @@ import {
   trackUnifiedState
 } from './lib/asyncUtils';
 import {
+  getChatCommandInteraction,
   getInteractionObservable,
   InteractionError,
   observeMessageReactions
@@ -246,16 +248,28 @@ export function setupServer(server: Server,
     }
 
     (async function loadMessagesFromDatabase() {
+      let channelId = BigInt((await deferredChannel).id);
       const rows = await schema.server_managed_message(db).select({
         server_id: server.id,
-        channel_id: BigInt((await deferredChannel).id)
+        channel_id: channelId
       }).all();
 
       const channel = await deferredChannel;
-      const messages = await Promise.all(rows.map(async (row): Promise<MessageWithRole> => ({
-        msg: await channel.messages.fetch(row.message_id.toString()),
-        role: row.role
-      })));
+      const messages = (await Promise.all(rows.map(async (row): Promise<MessageWithRole | null> => {
+        try {
+          let msg = await channel.messages.fetch(row.message_id.toString());
+          return ({
+            msg: msg,
+            role: row.role
+          });
+        } catch (err) {
+          if (err instanceof DiscordAPIError && err.code === 10008) {
+            await schema.server_managed_message(db).delete(row);
+            return null;
+          }
+          throw err;
+        }
+      }))).filter(isNonNulled);
       const msgMap = new Map(messages.map(elt => [BigInt(elt.msg.id), elt]));
       const msgMtx = new Map(messages.map(elt => [BigInt(elt.msg.id), new Mutex()]));
       messageMutexesDeferred.resolve(msgMtx);
@@ -378,16 +392,7 @@ export function setupServer(server: Server,
 
       const possiblyAttendingSeeder$ = of(notifiableServerSeeder$, notAttendingChange$).pipe(mergeAll());
 
-      let interaction$ = flattenDeferred(discordClientDeferred.then(c => getInteractionObservable(c)));
-      const chatCommandInteraction$ = interaction$.pipe(
-        map((interactionRaw) => {
-          if (!interactionRaw.isChatInputCommand()) return null;
-          const interaction = interactionRaw as discord.ChatInputCommandInteraction;
-          if (interaction.commandName !== commandNames.startModerated.name) return null;
-          return interaction;
-        }),
-        filter(isNonNulled)
-      );
+      const chatCommandInteraction$ = flattenDeferred(discordClientDeferred.then(c => getChatCommandInteraction(c)));
 
       const activeSeedSessionSubject = new BehaviorSubject<SeedSessionLog | null>(null);
       let activeSessionId$ = activeSeedSessionSubject.pipe(map(session => session?.id || null));
@@ -396,6 +401,7 @@ export function setupServer(server: Server,
         return chatCommandInteraction$.pipe(
           withLatestFrom(activeSessionId$),
           map(([interaction, activeSessionId]): SessionStartCommandOptions | null => {
+            if (interaction.commandName !== commandNames.startModerated.name) return null;
             const serverId = Number(interaction.options.getString(commandNames.startModerated.options.server));
             if (server.id !== serverId) return null;
             const options: Partial<SessionStartCommandOptions> = {};
@@ -557,8 +563,6 @@ export function setupServer(server: Server,
         activeSeedSessionSubject: activeSeedSessionSubject
       };
     })();
-
-    createMasterSubscriptionEntry(seedSession$, { context: 'seedSession' });
 
 
     // manage completeion of seed sessions
