@@ -14,12 +14,17 @@
   "seed_failed_threshold": 5,
   "seed_success_player_count": 40,
   "seeder_max_response_time": "3 minutes",
+  "default_grace_period": "5 minutes",
   "servers": [
     {
       "id": 1,
       "host": "localhost",
       "query_port": 27165,
-      "squadjs_ws_addr": "ws://localhost:8080"
+      "squadjs_ws_addr": "ws://localhost:8080",
+      "label": "seedmaster-test-server"
     }
-  ]
+  ],
+  "debug": {
+    "flushObservables": false
+  }
 }

@@ -9,6 +9,7 @@ import {
   Subscriber,
   Subscription,
   TeardownLogic,
+  OperatorFunction,
   Subscribable,
   Observer,
   Unsubscribable
@@ -25,7 +26,8 @@ import {
   combineLatestAll,
   map,
   distinctUntilChanged,
-  filter
+  filter,
+  catchError
 } from 'rxjs/operators';
 import { isNonNulled, isTruthy, ReadOnlyMap } from './typeUtils';
 
@@ -101,10 +103,6 @@ export function flattenDeferred<T, O extends Observable<T>>(promise: Promise<O>)
   return from(promise).pipe(mergeAll()) as unknown as O;
 }
 
-export async function getFirstAfterDeferred<T>(deferredSubject: DeferredBehaviorSubject<T>): Promise<T> {
-  return (await deferredSubject).value;
-}
-
 
 /**
  * mutates set with accumulated change elements
@@ -165,8 +163,21 @@ export function trackUnifiedState<T>(predicates: boolean[]) {
     );
 }
 
+export function scanToMap<K, T>(getKey: (elt: T) => K) {
+  return (o: Observable<T>): Observable<Map<K, T>> => {
+    const eltMap = new Map<K, T>();
+    return o.pipe(
+      map((elt) => {
+        eltMap.set(getKey(elt), elt);
+        return eltMap;
+      }, new Map<K, T>()),
+      startWith(eltMap)
+    );
+  };
+}
+
 export function scanChangesToMap<K, T>(getKey: (elt: T) => K) {
-  return (o: Observable<ChangeLike<T>>): Observable<ReadOnlyMap<K, T>> => {
+  return (o: Observable<ChangeLike<T>>): Observable<Map<K, T>> => {
     const eltMap = new Map<K, T>();
     return o.pipe(
       map((change) => {
@@ -185,8 +196,7 @@ export function scanChangesToMap<K, T>(getKey: (elt: T) => K) {
         return (changed) ? eltMap : null;
       }, new Map<K, T>()),
       filter(isNonNulled),
-      startWith(eltMap),
-      share()
+      startWith(eltMap)
     );
   };
 }
@@ -397,7 +407,7 @@ export class DependentSubject<T> {
   public addDependency(o: Observable<T>) {
     this.observeCount++;
 
-    const sub =  o.subscribe({
+    const sub = o.subscribe({
       next: (elt) => this.subject.next(elt),
       error: (err) => this.subject.error(err),
       complete: () => {
@@ -409,14 +419,14 @@ export class DependentSubject<T> {
 
     this.subject.subscribe({
       complete: () => sub.unsubscribe()
-    })
+    });
   }
 
-  public get observable () {
+  public get observable() {
     return this.subject as Observable<T>;
   }
 
-  protected get subject () {
+  protected get subject() {
     return this._subject;
   }
 }
@@ -443,6 +453,17 @@ export interface BehaviorObservable<T> extends Observable<T> {
   value: T;
 }
 
+export async function getFirstAfterDeferred<T>(deferredSubject: Promise<BehaviorObservable<T>>): Promise<T> {
+  return (await deferredSubject).value;
+}
+
+
+export function catchErrorsOfClass<T>(errorType: Error['constructor']) {
+  return (observable: Observable<T>): Observable<T> => observable.pipe(catchError((err, innerObservable) => {
+    if (err instanceof errorType) return innerObservable;
+    throw err;
+  }));
+}
 
 // export class BehaviorObservable<T> extends Observable<T> {
 //   private bSubject: BehaviorSubject<T>;

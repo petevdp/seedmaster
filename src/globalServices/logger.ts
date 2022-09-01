@@ -70,7 +70,7 @@ type WithContext = { context: string }
 export type LoggerMetadata = WithContext & { [key: string]: any };
 
 export const logger: LoggerWithMeta<LoggerMetadata> = winston.createLogger({
-  level: 'info',
+  level: 'debug',
   format: format.combine(format.timestamp(), format.metadata(), format.json(), format.colorize()),
   defaultMeta: { context: 'default' },
   transports: [

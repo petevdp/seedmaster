@@ -10,11 +10,17 @@ export enum TimeSpanUnit {
 
 const timeSpanRx = /(?<quantity>\d+) (?<unit>\w+)/;
 
+export class TimespanParsingError extends Error {
+  constructor(msg: string) {
+    super(msg);
+  }
+}
+
 export function parseTimespan(timespan: string) {
   const normalized = timespan.toLowerCase().replace(/\s/, ' ');
   const matches = normalized.match(timeSpanRx);
   if (!matches) {
-    throw new Error('unable to parse timespan ' + timespan);
+    throw new TimespanParsingError('unable to parse timespan ' + timespan);
   }
   const quantity = parseInt(matches.groups!['quantity']);
   const unit = matches.groups!['unit']

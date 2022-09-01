@@ -3,7 +3,7 @@ import * as t from 'io-ts';
 const RawPlayer = t.type({
   // playerID:  t.string,
   steamID: t.string,
-  name: t.string,
+  name: t.string
   // teamID: t.string,
   // squadID: t.string
 });
@@ -14,6 +14,7 @@ const ServerConfig = t.type({
   squadjs_ws_addr: t.string,
   host: t.string,
   query_port: t.number,
+  label: t.string
 });
 
 
@@ -29,10 +30,15 @@ export const ConfigCodec = t.type({
   seed_failed_threshold: t.number,
   seed_success_player_count: t.number,
   seeder_max_response_time: t.string,
+  default_grace_period: t.string,
   shim_squadjs: t.union([t.undefined, t.type({
     players: t.union([t.string, t.array(RawPlayer)]),
     starting_count: t.number,
     port: t.number
+  })]),
+  debug: t.union([t.undefined, t.type({
+    flush_observables: t.union([t.undefined, t.boolean]),
+    delete_stale_messages: t.union([t.undefined, t.boolean]),
   })])
 });
 

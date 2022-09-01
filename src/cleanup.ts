@@ -82,14 +82,14 @@ export function addMasterSubscriptionSubject<T>(subject: Subject<T>, meta: Logge
   createMasterSubscriptionEntry(subject, meta, subject);
 }
 
-export function createMasterSubscriptionEntry<T>(observable: Observable<T>, meta: LoggerMetadata, observer: Partial<Observer<T> >| null = null) {
+export function createMasterSubscriptionEntry<T>(observable: Observable<T>, meta: LoggerMetadata, observer: Partial<Observer<T>> | null = null) {
   let labelWithDefault = meta.context ?? 'anonymous';
   observerLabel.next({ type: 'added', elt: labelWithDefault });
   const errorHandledObservable = observable.pipe(
-    catchError((err, o) => {
-      baseLogger.error(err, { ...meta, category: 'masterSub' });
-      return o;
-    })
+    // catchError((err, o) => {
+    //   baseLogger.error(err, { ...meta, category: 'masterSub' });
+    //   throw err;
+    // })
   );
   masterSub.add(errorHandledObservable.subscribe({
     complete: () => {
@@ -97,7 +97,10 @@ export function createMasterSubscriptionEntry<T>(observable: Observable<T>, meta
       observerLabel.next({ type: 'removed', elt: labelWithDefault });
     },
     next: (elt) => observer?.next && observer.next(elt),
-    error: err => observer?.error && observer.error(err)
+    error: err => {
+      if (observer?.error) observer.error(err);
+      else throw err;
+    }
   }));
 }
 
@@ -114,12 +117,12 @@ export function getObserverCountRepr$(): Observable<string> {
 }
 
 export function registerInputObservable<T>(metadata: LoggerMetadata) {
+  const inputObservableLogger = baseLogger.child({
+    ...metadata,
+    category: 'inputObservable'
+  });
+  inputObservableLogger.info(`registered input observable ${metadata.context}`);
   return (observable: Observable<T>): Observable<T> => {
-    const inputObservableLogger = baseLogger.child({
-      ...metadata,
-      category: 'inputObservable'
-    });
-    inputObservableLogger.info(`Subscribed to input observable ${metadata.context}`);
     const out = observable.pipe(takeUntil(flushInputs));
     createMasterSubscriptionEntry(out, metadata, { complete: () => inputObservableLogger.info(`Completed input observable ${metadata.context}`) });
     return out;

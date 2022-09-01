@@ -76,6 +76,20 @@
         "typeName": "TIMESTAMP"
       },
       {
+        "name": "failure_impossible",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 16,
+        "typeName": "BOOL"
+      },
+      {
+        "name": "grace_period",
+        "isNullable": true,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
         "name": "id",
         "isNullable": false,
         "hasDefault": true,
@@ -147,6 +161,13 @@
         "hasDefault": false,
         "typeId": 23,
         "typeName": "INTEGER"
+      },
+      {
+        "name": "label",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 25,
+        "typeName": "TEXT"
       },
       {
         "name": "player_threshold_coefficient",

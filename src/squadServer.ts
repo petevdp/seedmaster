@@ -10,6 +10,7 @@ import { config } from './config';
 import { RawPlayer } from './config/Config';
 import { logger as masterLogger } from './globalServices/logger';
 import { auditChanges, Change, TimedChange } from './lib/asyncUtils';
+import { ServerDetails, ServerWithDetails } from './models';
 
 
 type SquadJSMessage = { time: Date; } & ({
@@ -21,25 +22,28 @@ type SquadJSMessage = { time: Date; } & ({
 });
 
 
-export async function queryGameServer(host: string, query_port: number) {
+export async function queryGameServer(host: string, query_port: number): Promise<ServerDetails> {
   if (config.shim_squadjs) {
-    const res = {
+    return {
       name: 'test squad server',
-      players: [],
+      map: 'a map',
       maxplayers: 100
-    } as unknown as GameDig.QueryResult;
-    return res;
+    } as ServerDetails;
   }
-  const res = GameDig.query({
+  return GameDig.query({
     type: 'squad',
     host: host,
     port: query_port
-  });
-  return res;
+  }).then(res => ({
+      name: res.name,
+      map: res.map,
+      maxplayers: res.maxplayers
+    } as ServerDetails
+  ));
 }
 
 export function observeSquadServer(server: Server): Observable<TimedChange<RawPlayer>> {
-  const observeSquadLogger = masterLogger.child({context:  'observeSquadServer'});
+  const observeSquadLogger = masterLogger.child({ context: 'observeSquadServer' });
   if (!!config.shim_squadjs) {
     return new Observable<TimedChange<RawPlayer>>((s) => {
       let players: Map<string, RawPlayer> = new Map();

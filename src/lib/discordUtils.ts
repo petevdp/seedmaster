@@ -1,58 +1,56 @@
 import discord, {
+  Interaction,
   Message,
   MessageReaction,
   PartialMessageReaction,
   PartialUser,
   User
 } from 'discord.js';
-import { from, Observable, of } from 'rxjs';
-import { concatAll, mergeMap } from 'rxjs/operators';
+import { from, Observable, of, fromEvent } from 'rxjs';
+import { concatAll, map, mergeMap, share, mergeAll, tap } from 'rxjs/operators';
 import { registerInputObservable } from '../cleanup';
+import { logger, ppObj } from '../globalServices/logger';
 import { flattenDeferred, Change } from './asyncUtils';
 
 
-export function getInteractionObservable(client: discord.Client) {
-
-  return new Observable<discord.Interaction>(s => {
-
-    function listener(interaction: discord.Interaction) {
-      s.next(interaction);
-    }
-
-    client.on('interactionCreate', listener);
-
-    return () => {
-      client.off('interactionCreate', listener);
-    };
-  }).pipe(registerInputObservable({ context: 'getInteractionObservable' }));
+let interaction$: Observable<Interaction> | null = null;
+export function getInteractionObservable(client: discord.Client): Observable<Interaction> {
+  if (interaction$) return interaction$;
+  interaction$ = (fromEvent(client, 'interactionCreate') as Observable<Interaction>).pipe(
+    registerInputObservable({ context: 'getReactionObservable' }),
+    tap((change) => logger.debug(`received discord interaction: ${ppObj(change)}`, change)),
+    share()
+  );
+  return interaction$;
 }
 
 export type ReactionChange = Change<{ reaction: MessageReaction | PartialMessageReaction; userId: bigint }>
+export type MessageReactionListenerArgs = [MessageReaction | PartialMessageReaction, User | PartialUser]
 
-export function getReactionObservable(client: discord.Client) {
-  return new Observable<ReactionChange>(s => {
-    function reactionAddListener(reaction: MessageReaction | PartialMessageReaction, user: User | PartialUser) {
-      s.next({
-        type: 'added',
-        elt: { userId: BigInt(user.id), reaction }
-      });
-    }
 
-    function reactionRemoveListener(reaction: MessageReaction | PartialMessageReaction, user: User | PartialUser) {
-      s.next({
-        type: 'removed',
-        elt: { userId: BigInt(user.id), reaction }
-      });
-    }
+let reaction$: Observable<ReactionChange> | null = null;
+export function getReactionObservable(client: discord.Client): Observable<ReactionChange> {
+  if (reaction$) return reaction$;
+  const reactionAdd$ = (fromEvent(client, 'messageReactionAdd') as Observable<MessageReactionListenerArgs>)
+    .pipe(map(([reaction, user]): ReactionChange => ({
+      type: 'added',
+      elt: { userId: BigInt(user.id), reaction }
+    })));
 
-    client.on('messageReactionAdd', reactionAddListener);
-    client.on('messageReactionRemove', reactionRemoveListener);
+  const reactionRemove$ = (fromEvent(client, 'messageReactionAdd') as Observable<MessageReactionListenerArgs>)
+    .pipe(map(([reaction, user]): ReactionChange => ({
+      type: 'added',
+      elt: { userId: BigInt(user.id), reaction }
+    })));
 
-    return () => {
-      client.off('messageReactionAdd', reactionAddListener);
-      client.off('messageReactionRemove', reactionRemoveListener);
-    };
-  }).pipe(registerInputObservable({ context: 'getReactionObservable' }));
+  reaction$ = of(reactionAdd$, reactionRemove$)
+    .pipe(
+      mergeAll(),
+      registerInputObservable({ context: 'getReactionObservable' }),
+      tap((change) => logger.debug(`received discord reaction change: ${ppObj(change)}`, change)),
+      share()
+    );
+  return reaction$;
 }
 
 
@@ -68,7 +66,7 @@ export function observeMessageReactions(client: discord.Client, message: Message
     );
   }));
 
-  return of(existingReactions, reactionObservable).pipe(concatAll(), registerInputObservable({ context: 'observeMessageReactions' }));
+  return of(existingReactions, reactionObservable).pipe(concatAll());
 }
 
 

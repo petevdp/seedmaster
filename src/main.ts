@@ -50,16 +50,18 @@ import {
   distinct,
   takeWhile,
   startWith,
-  withLatestFrom
+  withLatestFrom,
+  shareReplay
 } from 'rxjs/operators';
 import SteamAPI from 'steamapi';
 import { Seeder, Server, Tenant } from './__generated__';
+import { registerDiscordCommands } from './discordCommands';
 import { buildSignupMessageOptions } from './discordComponents';
 import {
   accumulateMap,
   flattenDeferred,
   getElt,
-  Change
+  Change, Future, DependentSubject, scanToMap
 } from './lib/asyncUtils';
 import { config } from './config';
 import { getConfiguredConnectionPool } from './db';
@@ -79,9 +81,10 @@ import {
 } from './cleanup';
 import { logger, steamClient } from './globalServices/logger';
 import { parseTimespan } from './lib/timespan';
-import { NotifyWhen, SeederResponse } from './models';
+import { NotifyWhen, SeederResponse, ServerWithDetails } from './models';
 import { setupServer } from './setupServer';
 import { v4 as uuidv4 } from 'uuid';
+
 
 export default function main() {
   logger.info('startup');
@@ -119,21 +122,6 @@ export default function main() {
   };
 
 
-  const discordCommandsRegistered: Promise<void> = (async function registerDiscordCommands() {
-    const instanceTenant = await deferredInstanceTenant;
-    // register application commands
-    const commands = [
-      new SlashCommandBuilder().setName('sm-configure-server').setDescription('reconfigure an existing server')
-        .addSubcommand((cmd) => cmd.setName('add').setDescription('Configure a new server'))
-    ];
-    const rest = new REST({ version: '10' }).setToken(environment.DISCORD_BOT_TOKEN);
-    await rest.put(Routes.applicationGuildCommands(config.discord_client_id.toString(), instanceTenant.guild_id.toString()), { body: commands });
-    logger.info('successfully registered application commands');
-  })();
-
-  // create sign up message
-
-
   const serversDeferred = (async function initServerState() {
     const instanceTenant = await deferredInstanceTenant;
     const serversInDb = await schema.server(db).select({ tenant_id: instanceTenant.id }).all();
@@ -156,6 +144,9 @@ export default function main() {
     }
     return schema.server(db).select({}).all();
   })();
+
+  const serverWithDetailsDeferred = new Future<Observable<ServerWithDetails[]>>();
+  deferredInstanceTenant.then(t => registerDiscordCommands(t.guild_id.toString(), flattenDeferred(serverWithDetailsDeferred)));
 
   const rolesDeferred = (async function ensureRolesCreated() {
     const guild = await getGuild();
@@ -427,9 +418,11 @@ export default function main() {
 
   (function setupServers() {
     serversDeferred.then(servers => {
+      const serverUpdateSubject = new DependentSubject<ServerWithDetails>();
       for (let server of servers) {
         const {
-          serverSeedSignupAttempt$
+          serverSeedSignupAttempt$,
+          gameServerUpdate$
         } = setupServer(
           server,
           deferredDiscordClient,
@@ -441,14 +434,43 @@ export default function main() {
           allSeedersBySteamId
         );
 
-        serverSeedSignupAttempt$.subscribe(usersToPromptForSignup$);
+        serverUpdateSubject.addDependency(gameServerUpdate$);
       }
+
+      serverWithDetailsDeferred.resolve(serverUpdateSubject.observable.pipe(
+        scanToMap(server => server.id),
+        map(servers => [...servers.values()])
+      ));
 
       logger.info(`Active observers after servers setup: ${getObserverCountRepr()}`);
     });
   })();
   seeder$.connect();
   logger.info(`Active observers on main end: ${getObserverCountRepr()}`);
+
+
+  (function watchForProcessInturrupt() {
+    // ensure SIGINT is emitted properly on windows
+    var win32 = process.platform === 'win32';
+    if (win32) {
+      var readline = require('readline'),
+        rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout
+        });
+
+      rl.on('SIGINT', function() {
+        process.emit('SIGINT');
+      });
+    }
+
+    process.on('SIGINT', async () => {
+      logger.info('received SIGINT, winding down...');
+      if (config.debug?.flush_observables === undefined || config.debug.flush_observables) await tryToFlushInputObservables();
+      logger.info('Exiting');
+      process.exit();
+    });
+  })();
 }
 
 function observeNotifiable(discordClient: discord.Client, tenant: Tenant, discordId: bigint, steamId: bigint, notifySetting$: Observable<NotifyWhen>): Observable<boolean> {
@@ -480,23 +502,3 @@ function observeNotifiable(discordClient: discord.Client, tenant: Tenant, discor
   );
 }
 
-// ensure SIGINT is emitted properly on windows
-var win32 = process.platform === 'win32';
-if (win32) {
-  var readline = require('readline'),
-    rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
-
-  rl.on('SIGINT', function() {
-    process.emit('SIGINT');
-  });
-}
-
-process.on('SIGINT', async () => {
-  logger.info('received SIGINT, winding down...');
-  await tryToFlushInputObservables();
-  logger.info('Exiting');
-  process.exit();
-});
