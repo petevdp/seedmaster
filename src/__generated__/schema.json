@@ -268,25 +268,6 @@
     ]
   },
   {
-    "name": "server_seeder",
-    "columns": [
-      {
-        "name": "seeder_id",
-        "isNullable": false,
-        "hasDefault": false,
-        "typeId": 23,
-        "typeName": "INTEGER"
-      },
-      {
-        "name": "server_id",
-        "isNullable": false,
-        "hasDefault": false,
-        "typeId": 23,
-        "typeName": "INTEGER"
-      }
-    ]
-  },
-  {
     "name": "tenant",
     "columns": [
       {

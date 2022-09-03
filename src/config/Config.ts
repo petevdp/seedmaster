@@ -18,6 +18,7 @@ const ServerConfig = t.type({
 });
 
 
+// find way to validate that there aren't any unexpected properties
 export const ConfigCodec = t.type({
   guild_id: t.string,
   discord_client_id: t.string,

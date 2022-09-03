@@ -66,8 +66,15 @@ export interface LoggerWithMeta<T> extends Logger {
   child(options: LoggerMetadata): Logger;
 }
 
+
 type WithContext = { context: string }
 export type LoggerMetadata = WithContext & { [key: string]: any };
+
+export class MetadataError extends Error {
+  constructor(msg: string, public metadata: any) {
+    super(msg);
+  }
+}
 
 export const logger: LoggerWithMeta<LoggerMetadata> = winston.createLogger({
   level: 'debug',
@@ -98,6 +105,7 @@ export const ppObj = (obj: any) => prettyPrint(makeSerializable(obj), {
 });
 
 export const steamClient = new SteamAPI(environment.STEAM_API_KEY);
+
 
 
 if (environment.NODE_ENV !== NodeEnv.PRODUCTION) {

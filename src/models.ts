@@ -28,7 +28,8 @@ export enum NotifyWhen {
   Online,
   Playing,
   Always,
-  Never
+  Never,
+  PlayingSquad
 }
 
 

@@ -21,7 +21,7 @@ import {
 import {
   auditChanges,
   Change,
-  Future, scanChangesToMap,
+  scanChangesToMap,
   scanChangesToSet
 } from './lib/asyncUtils';
 import { setTimeout } from 'timers/promises';
@@ -34,6 +34,7 @@ import {
   ppObj
 } from './globalServices/logger';
 import secondsToMilliseconds from 'date-fns/secondsToMilliseconds';
+import { Future } from './lib/future';
 import { isNonNulled } from './lib/typeUtils';
 
 const flushInputs = new Future<void>();
@@ -78,18 +79,17 @@ observerLabel.subscribe(change => {
 
 type ObserverNoError<T> = Omit<Partial<Observer<T>>, 'error'>;
 
-export function addMasterSubscriptionSubject<T>(subject: Subject<T>, meta: LoggerMetadata) {
-  createMasterSubscriptionEntry(subject, meta, subject);
-}
-
-export function createMasterSubscriptionEntry<T>(observable: Observable<T>, meta: LoggerMetadata, observer: Partial<Observer<T>> | null = null) {
+/**
+ * create a subscription with the given observable/observer that is targeted as needing to have completed during the flush process
+ */
+export function createObserverTarget<T>(observable: Observable<T>, meta: LoggerMetadata, observer: Partial<Observer<T>> | null = null) {
   let labelWithDefault = meta.context ?? 'anonymous';
   observerLabel.next({ type: 'added', elt: labelWithDefault });
   const errorHandledObservable = observable.pipe(
-    // catchError((err, o) => {
-    //   baseLogger.error(err, { ...meta, category: 'masterSub' });
-    //   throw err;
-    // })
+    catchError((err, o) => {
+      baseLogger.error(err, { ...meta, category: 'masterSub' });
+      throw err;
+    })
   );
   masterSub.add(errorHandledObservable.subscribe({
     complete: () => {
@@ -124,7 +124,7 @@ export function registerInputObservable<T>(metadata: LoggerMetadata) {
   inputObservableLogger.info(`registered input observable ${metadata.context}`);
   return (observable: Observable<T>): Observable<T> => {
     const out = observable.pipe(takeUntil(flushInputs));
-    createMasterSubscriptionEntry(out, metadata, { complete: () => inputObservableLogger.info(`Completed input observable ${metadata.context}`) });
+    createObserverTarget(out, metadata, { complete: () => inputObservableLogger.info(`Completed input observable ${metadata.context}`) });
     return out;
   };
 }

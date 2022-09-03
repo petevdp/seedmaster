@@ -1,89 +1,24 @@
+import { BehaviorSubject, from, Observable, Subject } from 'rxjs';
 import {
-  BehaviorSubject,
-  EMPTY,
-  from,
-  Observable,
-  ObservableInput,
-  of,
-  Subject,
-  Subscriber,
-  Subscription,
-  TeardownLogic,
-  OperatorFunction,
-  Subscribable,
-  Observer,
-  Unsubscribable
-} from 'rxjs';
-import {
-  share,
-  first,
+  catchError,
+  combineLatestAll,
   concatMap,
-  startWith,
-  tap,
+  distinctUntilChanged,
+  filter, first,
   mergeAll,
   scan,
-  toArray,
-  combineLatestAll,
-  map,
-  distinctUntilChanged,
-  filter,
-  catchError
-} from 'rxjs/operators';
-import { isNonNulled, isTruthy, ReadOnlyMap } from './typeUtils';
-
-
-type Resolve<T> = (value: (T | PromiseLike<T>)) => void;
-type Reject = (reason?: any) => void;
+  share,
+  startWith
+} from './rxOperators';
+import { Future } from './future';
+import { map } from './rxOperators';
+import { isNonNulled } from './typeUtils';
 
 
 export class AlreadyFulfilledError extends Error {
   constructor() {
     super('This promise has already been fi');
   }
-}
-
-/**
- * A Promise that can be resolved or rejected externally
- */
-export class Future<T> implements Promise<T> {
-  public resolve: Resolve<T>;
-  public reject: Reject;
-  public fulfilled: boolean = false;
-  private promise: Promise<T>;
-  public then: Promise<T>['then'];
-  public catch: Promise<T>['catch'];
-  public finally: Promise<T>['finally'];
-
-
-  constructor() {
-    let _resolve: Resolve<T>;
-    let _reject: Reject;
-
-    this.promise = new Promise(
-      (resolve, reject) => {
-        _resolve = resolve;
-        _reject = reject;
-      });
-
-
-    this.resolve = (value) => {
-      if (this.fulfilled) throw new AlreadyFulfilledError();
-      _resolve(value);
-    };
-    this.reject = (value: any) => {
-      if (this.fulfilled) throw new AlreadyFulfilledError();
-      _reject(value);
-    };
-
-    this.then = ((...args: any[]) => this.promise.then(...args)) as typeof this.promise.then;
-    this.catch = ((...args: any[]) => this.promise.catch(...args)) as typeof this.promise.catch;
-    this.finally = ((...args: any[]) => this.promise.finally(...args)) as typeof this.promise.finally;
-  }
-
-  get [Symbol.toStringTag]() {
-    return 'FUTURREEEEEE WOOOO SPOOOOOKYYYY';
-  }
-
 }
 
 
@@ -302,9 +237,9 @@ export class ChangeError<T> extends Error {
   }
 }
 
-export function auditChanges<T, C extends ChangeLike<T>>(getKey: (elt: T) => string) {
+export function auditChanges<T, K, C extends ChangeLike<T>>(getKey: (elt: T) => K) {
   return (o: Observable<C>): Observable<C> => {
-    const keys = new Set<string>();
+    const keys = new Set<K>();
     return o.pipe(
       map((change) => {
         const key = getKey(change.elt);
@@ -353,49 +288,6 @@ export function ignoreRedundantChange<T, K, C extends ChangeLike<T>>(getKey: (el
   };
 }
 
-export type AddResource<T> = {
-  type: 'added';
-  elt: T;
-}
-
-export type UpdateResource<K, E, R> = {
-  type: 'updated';
-  edit: (elt: R) => E;
-  key: K;
-};
-
-export type RemoveResource<K> = {
-  type: 'removed';
-  key: K;
-};
-
-
-export type ResourceChange<T, K, E, R> =
-  AddResource<T>
-  | UpdateResource<K, E, R>
-  | RemoveResource<K>
-
-
-/**
- * A subject that relies on its consumers to keep track of 'next' callsites, so it can complete
- */
-// export class DependentSubject<T> extends Subject<T> {
-//   constructor() {
-//     super();
-//   }
-//
-//   private refCount = 0;
-//
-//   addRef(refDisposedOf: Promise<unknown>) {
-//     this.refCount += 1;
-//     refDisposedOf.then(() => {
-//       this.refCount -= 1;
-//       if (this.refCount <= 0) this.complete();
-//     });
-//   }
-//
-// }
-
 /**
  * A subject that explicitely tracks its dependant observables, and completes when none are left.
  * Will only work when dependent observables are using a non-sync scheduler
@@ -431,30 +323,13 @@ export class DependentSubject<T> {
   }
 }
 
-export class DependentBehaviorSubject<T> extends DependentSubject<any> {
-  private bSubject: BehaviorSubject<T>;
-
-  constructor(startingValue: T) {
-    super();
-    this.bSubject = new BehaviorSubject(startingValue);
-  }
-
-  public get value() {
-    return this.bSubject.value;
-  }
-
-  protected get subject(): Subject<T> {
-    return this.bSubject;
-  }
-}
-
 
 export interface BehaviorObservable<T> extends Observable<T> {
   value: T;
 }
 
-export async function getFirstAfterDeferred<T>(deferredSubject: Promise<BehaviorObservable<T>>): Promise<T> {
-  return (await deferredSubject).value;
+export async function getFirstAfterDeferred<T>(deferredSubject: Promise<Observable<T>>): Promise<T> {
+  return (await deferredSubject).pipe(first()).toPromise() as Promise<T>
 }
 
 
@@ -465,16 +340,6 @@ export function catchErrorsOfClass<T>(errorType: Error['constructor']) {
   }));
 }
 
-// export class BehaviorObservable<T> extends Observable<T> {
-//   private bSubject: BehaviorSubject<T>;
-//   constructor(subscribe?: (this: Observable<T>, subscriber: Subscriber<T>) => TeardownLogic, initialValue: T) {
-//     super(subscribe);
-//     this.bSubject = new BehaviorSubject(initialValue);
-//     this.subscribe(this.bSubject);
-//     this.subscribe({complete: () => this.bSubject.unsubscribe()})
-//   }
-//
-//   public get value() {
-//     return this.bSubject;
-//   }
-// }
+export function isDeferred<T>(elt: any): elt is Promise<T> | Future<T> {
+  return (elt instanceof  Promise) || (elt instanceof Future);
+}

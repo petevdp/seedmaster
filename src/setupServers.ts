@@ -1,4 +1,4 @@
-import { ConnectionPool } from '@databases/pg';
+import { sql } from '@databases/pg';
 import { DiscordAPIError } from '@discordjs/rest';
 import { Mutex } from 'async-mutex';
 import minutesToMilliseconds from 'date-fns/minutesToMilliseconds';
@@ -13,8 +13,10 @@ import {
   BehaviorSubject,
   combineLatest,
   EMPTY,
+  concat,
   from,
-  interval,
+  interval, merge,
+  asyncScheduler,
   Observable,
   of,
   Subject,
@@ -31,7 +33,6 @@ import {
   mergeMap,
   share,
   startWith,
-  switchMap,
   tap,
   withLatestFrom
 } from 'rxjs/operators';
@@ -40,48 +41,53 @@ import {
   Player,
   Seeder,
   SeedSessionLog,
-  Server,
-  Tenant
+  Server
 } from './__generated__';
 import {
-  createMasterSubscriptionEntry,
+  createObserverTarget,
   registerInputObservable
 } from './cleanup';
 import { config } from './config';
-import * as schema from './db';
-import { seed_session_log } from './db';
+import { dbPool, schema } from './db';
+import { discordClientDeferred } from './discordClient';
 import { commandNames } from './discordCommands';
 import {
   editServerSeedMessageMapName,
   editServerSeedMessagePlayerCount,
   playerJoinedSession,
   seedSessionStart,
-  serverSeedMessage
+  serverSeedMessage, signUpPromptMessage
 } from './discordComponents';
 import { logger, ppObj } from './globalServices/logger';
+import { getInstanceGuild, instanceTenantDeferred } from './instanceTenant';
 import {
   accumulateMap,
-  BehaviorObservable,
   catchErrorsOfClass,
   Change,
-  changeOfType,
-  flattenDeferred,
-  Future,
-  getFirstAfterDeferred,
+  changeOfType, flattenDeferred, getElt,
   mapChange,
-  ResourceChange,
-  scanChangesToMap,
+  scanChangesToMap, toChange,
   trackUnifiedState
 } from './lib/asyncUtils';
 import {
   getChatCommandInteraction,
-  getInteractionObservable,
   InteractionError,
   observeMessageReactions
 } from './lib/discordUtils';
+import {
+  createEntityStore,
+  EntityStore,
+  processAllEntities, IndexCollection
+} from './lib/entityStore';
+import { Future } from './lib/future';
+import {
+  observeOn,
+  shareReplay,
+  takeUntil,
+  takeWhile
+} from './lib/rxOperators';
 import { parseTimespan, TimespanParsingError } from './lib/timespan';
 import { enumRepr, isNonNulled } from './lib/typeUtils';
-import { EndReason } from './manageSeeders';
 import {
   MessageWithRole,
   PlayerWithDetails,
@@ -92,21 +98,103 @@ import {
   ServerWithDetails,
   SessionStartCommandOptions
 } from './models';
+import {
+  notifiableSeedersStoreDeferred,
+  seederStoreDeferred
+} from './setupSeeders';
 import { observeSquadServer, queryGameServer } from './squadServer';
 
-export class SetupServer {
-  // avoid top level awaits in setup
+
+const serverIndexes = {
+  id: (server: ServerWithDetails) => server.id
+};
+
+export type ServerEntityStore = EntityStore<'id', number, ServerWithDetails>;
+const _serversDeferred = new Future<ServerEntityStore>();
+export const serverStoreDeferred = _serversDeferred as Promise<ServerEntityStore>;
+
+const activeSeedSessionIndexes = {
+  id: (session: SeedSessionLog) => session.id,
+  serverId: (session: SeedSessionLog) => session.server_id
+};
+
+type SeedSessionEntityStore = EntityStore<keyof (typeof activeSeedSessionIndexes), number, SeedSessionLog>;
+const _activeSeedSessionsDeferred = new Future<SeedSessionEntityStore>();
+export const activeSeedSessionsDeferred = _activeSeedSessionsDeferred as Promise<SeedSessionEntityStore>;
+
+// // serverId is bigint so it'll work with MultiIndexing
+export type SignUpReaction = { discordUserId: bigint; serverId: number };
+//
+const signUpIndexes = {
+  discordUserId: (r: SignUpReaction) => r.discordUserId,
+  serverId: (r: SignUpReaction) => BigInt(r.serverId)
+};
+type SignUpEntityStore = EntityStore<keyof (typeof signUpIndexes), bigint, SignUpReaction>;
+// attempts which d
+
+const _signUpReactions = new Future<SignUpEntityStore>();
+export const signUpReactions = _signUpReactions as Promise<SignUpEntityStore>;
+
+
+export async function setupServers() {
+  const servers = await (async function initServerState() {
+    const instanceTenant = await instanceTenantDeferred;
+    const serversInDb = await schema.server(dbPool).select({ tenant_id: instanceTenant.id }).all();
+    for (let configured of config.servers) {
+      await schema.server(dbPool).insertOrUpdate(['id'], {
+        ...configured,
+        tenant_id: instanceTenant.id,
+        player_threshold_coefficient: config.player_threshold_coefficient,
+        seeder_threshold_coefficient: config.seeder_threshold_coefficient,
+        seed_start_threshold: config.seed_start_threshold,
+        seed_failed_threshold: config.seed_failed_threshold,
+        seed_success_player_count: config.seed_success_player_count,
+        seeder_max_response_time: parseTimespan(config.seeder_max_response_time)
+      });
+    }
+    for (let s of serversInDb) {
+      if (!config.servers.map(s => s.id).includes(s.id)) {
+        await schema.server(dbPool).delete({ id: s.id });
+      }
+    }
+    return schema.server(dbPool).select({}).all();
+  })();
+
+
+  let mergedServerChange$: Observable<Change<ServerWithDetails>> = EMPTY;
+  let mergedSignup$: Observable<Change<SignUpReaction>> = EMPTY;
+  let mergedSeedSession$: Observable<Change<SeedSessionLog>> = EMPTY;
+  for (let server of servers) {
+    const {
+      serverSeedSignupChange$,
+      gameServerChange$,
+      seedSession$
+    } = setupServer(server);
+
+    mergedSignup$ = merge(mergedSignup$, serverSeedSignupChange$);
+    mergedServerChange$ = merge(mergedServerChange$, gameServerChange$);
+    mergedSeedSession$ = merge(mergedSeedSession$, seedSession$);
+  }
+
+  _serversDeferred.resolve(createEntityStore(mergedServerChange$, serverIndexes));
+  _activeSeedSessionsDeferred.resolve(createEntityStore(mergedSeedSession$, activeSeedSessionIndexes as IndexCollection<keyof typeof activeSeedSessionIndexes, number, SeedSessionLog>));
+  _signUpReactions.resolve(createEntityStore(mergedSignup$, signUpIndexes));
+
+  // manage completeion of seed sessions
+  createObserverTarget(from(mergedSeedSession$.toPromise().finally(async () => {
+    const hangingSessions = [...(await activeSeedSessionsDeferred).state.id.values()];
+    for (let session of hangingSessions) {
+      await schema.seed_session_log(dbPool).update({ id: session.id }, {
+        end_reason: SeedSessionEndReason.Cancelled,
+        end_time: new Date()
+      });
+      logger.warn(`cancelled remaining active seed session ${session.id} due to unforseen error`, { session });
+    }
+  })), { context: 'ManageCompletionOfSeedSessions' });
 }
 
 
-export function setupServer(server: Server,
-                            discordClientDeferred: Promise<discord.Client>,
-                            tenantDeferred: Promise<Tenant>,
-                            db: ConnectionPool,
-                            seeder$: Observable<Change<Seeder>>,
-                            notifiableSeeder$: Observable<Change<Seeder>>,
-                            allSeedersByDiscordId: Map<bigint, Seeder>,
-                            allSeedersBySteamId: Map<bigint, Seeder>) {
+export function setupServer(server: Server) {
   const deferredChannel: Promise<TextChannel> = (async () => {
     const channel = await (await discordClientDeferred).channels.fetch(config.seeding_channel_id);
     if (channel === null) {
@@ -117,20 +205,26 @@ export function setupServer(server: Server,
 
 
   // fetch game server updates on an interval
-  const deferredGameServerUpdate$: Promise<BehaviorObservable<ServerWithDetails>> = (async function observeGameServerUpdates() {
+  const gameServerUpdate$: Observable<Change<ServerWithDetails>> = (function observeGameServerUpdates() {
     const getServerWithDetails = () => queryGameServer(server.host, server.query_port).then(details => ({ ...server, ...details }) as ServerWithDetails);
-    const sub = new BehaviorSubject<ServerWithDetails>(await getServerWithDetails());
     const pollGameServerUpdate$: Observable<ServerWithDetails> = interval(minutesToMilliseconds(1)).pipe(
       registerInputObservable({ context: 'pollGameServerUpdate' }),
-      switchMap(getServerWithDetails),
+      mergeMap(getServerWithDetails),
       distinctUntilChanged(deepEquals)
     );
-    pollGameServerUpdate$.subscribe(sub);
-    sub.subscribe(details => {
-      console.log('details1!!');
-    });
-    return sub as BehaviorObservable<ServerWithDetails>;
+
+    return concat(
+      getServerWithDetails().then(toChange('added')),
+      pollGameServerUpdate$.pipe(map(toChange('updated')))
+    ).pipe(shareReplay(1));
   })();
+  gameServerUpdate$.subscribe((update) => {
+    logger.info('game server update: ', update);
+  });
+
+  function getGameServerDetails() {
+    return gameServerUpdate$.pipe(first(), map(getElt)).toPromise() as Promise<ServerWithDetails>;
+  }
 
   const activePlayer$: Observable<Change<PlayerWithDetails>> = (function trackAndPersistActivePlayers() {
     const playerMtx = new Mutex();
@@ -147,7 +241,7 @@ export function setupServer(server: Server,
           case 'added': {
             await playerMtx.acquire();
             try {
-              await schema.player(db).insertOrUpdate(['steam_id'], { steam_id: steamId });
+              await schema.player(dbPool).insertOrUpdate(['steam_id'], { steam_id: steamId });
             } finally {
               playerMtx.release();
             }
@@ -171,14 +265,13 @@ export function setupServer(server: Server,
       tap(change => logger.info(`${change.type} ${change.elt.name} (${change.elt.steam_id})`, change)),
       share()
     );
-    createMasterSubscriptionEntry(o, { context: 'trackAndPersistActivePlayers' });
+    createObserverTarget(o, { context: 'trackAndPersistActivePlayers' });
     return o;
   })();
   const activePlayers = new Map<bigint, PlayerWithDetails>();
-  createMasterSubscriptionEntry(activePlayer$, { context: 'accumulateActivePlayers' }, { next: accumulateMap(activePlayers, player => player.steam_id) });
-  createMasterSubscriptionEntry(activePlayer$, { context: 'countActivePlayers' }, { next: () => logger.info(`num active players: ${activePlayers.size}`) });
+  createObserverTarget(activePlayer$, { context: 'accumulateActivePlayers' }, { next: accumulateMap(activePlayers, player => player.steam_id) });
+  createObserverTarget(activePlayer$, { context: 'countActivePlayers' }, { next: () => logger.info(`num active players: ${activePlayers.size}`) });
 
-  type MessageChange = ResourceChange<{ options: MessageOptions; role: ServerMessageRole }, string, { options: MessageEditOptions; role: ServerMessageRole }, Message>;
   const {
     serverMessagesDeferred,
     sendManagedMessage,
@@ -194,7 +287,7 @@ export function setupServer(server: Server,
       const channel = await deferredChannel;
       const msg = await channel.send(options);
       let messageId = BigInt(msg.id);
-      await schema.server_managed_message(db).insert({
+      await schema.server_managed_message(dbPool).insert({
         server_id: server.id,
         channel_id: BigInt(channel.id),
         message_id: messageId,
@@ -234,7 +327,7 @@ export function setupServer(server: Server,
       try {
         const msg = await channel.messages.fetch(messageId.toString());
         await msg.delete();
-        await schema.server_managed_message(db).delete({
+        await schema.server_managed_message(dbPool).delete({
           server_id: server.id,
           channel_id: BigInt(channel.id),
           message_id: messageId
@@ -249,7 +342,7 @@ export function setupServer(server: Server,
 
     (async function loadMessagesFromDatabase() {
       let channelId = BigInt((await deferredChannel).id);
-      const rows = await schema.server_managed_message(db).select({
+      const rows = await schema.server_managed_message(dbPool).select({
         server_id: server.id,
         channel_id: channelId
       }).all();
@@ -264,7 +357,7 @@ export function setupServer(server: Server,
           });
         } catch (err) {
           if (err instanceof DiscordAPIError && err.code === 10008) {
-            await schema.server_managed_message(db).delete(row);
+            await schema.server_managed_message(dbPool).delete(row);
             return null;
           }
           throw err;
@@ -290,8 +383,8 @@ export function setupServer(server: Server,
     const channel = await deferredChannel;
     let msgWithRole = [...(await serverMessagesDeferred).values()].find((elt) => elt.role === ServerMessageRole.Main) || null;
 
-    const gameServerState = (await deferredGameServerUpdate$).value;
-    const builtMessage = serverSeedMessage(gameServerState.name, activePlayers.size);
+    const gameServerState = await gameServerUpdate$.pipe(first(), map(getElt)).toPromise();
+    const builtMessage = serverSeedMessage(gameServerState!.name, activePlayers.size);
     let msg = msgWithRole?.msg;
     if (msg) {
       msg = await editManagedMessage(BigInt(msg.id), builtMessage as MessageEditOptions);
@@ -306,84 +399,129 @@ export function setupServer(server: Server,
       .then(([client, msg]) => observeMessageReactions(client, msg))
   );
 
-  const seedSignupAttempt$: Observable<bigint> = (function observeSignupAttempts() {
+  const seedSignUpChange$: Observable<Change<SignUpReaction>> = (function observeSignupAttempts() {
     return messageReaction$.pipe(
-      filter(change => change.type === 'added'),
-      map(change => change.elt),
-      mergeMap((elt) => {
-        if (allSeedersByDiscordId.has(elt.userId)) return EMPTY;
-        return of(BigInt(elt.userId));
+      mapChange((reaction): SignUpReaction => {
+        return {
+          serverId: server.id,
+          discordUserId: BigInt(reaction.userId)
+        };
       })
     );
   })();
 
+
   // manage and record seeding sessions
+  let seedSession$: Observable<Change<SeedSessionLog>>;
   (function setupSeeding() {
+    const serverSeeder$ = seedSignUpChange$.pipe(
+      changeOfType('added'),
+      mergeMap(async (reactionAdded) => {
+        let seederStore = await seederStoreDeferred;
+        const seeder = seederStore.state.discordId.get(reactionAdded.discordUserId);
+        if (!seeder) {
+          const [{ count }] = (await dbPool.query(sql`SELECT COUNT(*)
+                                                      FROM users_prompted_for_signup
+                                                      WHERE discord_id ? ${reactionAdded.discordUserId}`)) as [{ count: bigint }];
+          if (count !== 0n) return null;
+          const guildMember = await (await getInstanceGuild()).members.fetch(reactionAdded.discordUserId.toString());
+          guildMember.send(signUpPromptMessage(guildMember, 'https://discord.com/channels/465971449954304000/1011993778787201125/1015395461374410812'));
+        }
 
-    const serverSeeder$: Observable<Change<Seeder>> = ((() => {
-      // listen for seeder reactions and track on the database
-      // let  = getFirstAfterDeferred(deferredServerMessage$);
+        const reactionRemoved = seedSignUpChange$.pipe(
+          changeOfType('removed'),
+          filter(reaction => reaction.discordUserId === reactionAdded.discordUserId),
+          first()
+        ).toPromise();
 
 
-      return messageReaction$.pipe(
-        withLatestFrom(mainServerMessageDeferred),
-        mergeMap(async ([reactionChange, serverMessage]): Promise<Change<Seeder> | undefined> => {
-          const { reaction, userId } = reactionChange.elt;
-          if (reaction.message.id !== serverMessage.id) throw new Error('unable to locate server reaction message');
-          const seeder = allSeedersByDiscordId.get(BigInt(userId));
-          if (!seeder) return;
-          switch (reactionChange.type) {
-            case 'added': {
-              await schema.server_seeder(db).insert({
-                server_id: server.id,
-                seeder_id: seeder.id
-              });
-              return {
-                elt: seeder,
-                type: 'added'
-              } as Change<Seeder>;
-            }
-            case 'removed': {
-              await schema.server_seeder(db).delete({
-                server_id: server.id,
-                seeder_id: seeder.id
-              });
-              return {
-                elt: seeder,
-                type: 'removed'
-              };
-            }
-            case 'updated': {
-              return {
-                elt: seeder,
-                type: 'updated'
-              };
-            }
-          }
-          return;
-        }),
-        filter(isNonNulled)
-      );
-    })());
+        const seederChanges = processAllEntities(seederStore)
+          .pipe(
+            filter(seederChange => seederChange.elt.discord_id === reactionAdded.discordUserId),
+
+            // keep listening until the reaction was removed or the seeder leaves
+            takeWhile(change => change.type !== 'removed'),
+            takeUntil(reactionRemoved)
+          );
+        return seederChanges;
+
+      }),
+      filter(isNonNulled)
+    );
+
+
+    // const serverSeeder$: Observable<Change<Seeder>> = ((() => {
+    //   // listen for seeder reactions and track on the database
+    //   // let  = getFirstAfterDeferred(deferredServerMessage$);
+    //
+    //
+    //   return messageReaction$.pipe(
+    //     withLatestFrom(mainServerMessageDeferred, seederStoreDeferred),
+    //     mergeMap(async ([reactionChange, serverMessage, seeders]): Promise<Change<Seeder> | undefined> => {
+    //       const { reaction, userId } = reactionChange.elt;
+    //       if (reaction.message.id !== serverMessage.id) throw new Error('unable to locate server reaction message');
+    //       const seeder = seeders.state.discordId.get(BigInt(userId));
+    //       if (!seeder) return;
+    //       switch (reactionChange.type) {
+    //         case 'added': {
+    //           await schema.server_seeder(dbPool).insert({
+    //             server_id: server.id,
+    //             seeder_id: seeder.id
+    //           });
+    //           return {
+    //             elt: seeder,
+    //             type: 'added'
+    //           } as Change<Seeder>;
+    //         }
+    //         case 'removed': {
+    //           await schema.server_seeder(dbPool).delete({
+    //             server_id: server.id,
+    //             seeder_id: seeder.id
+    //           });
+    //           return {
+    //             elt: seeder,
+    //             type: 'removed'
+    //           };
+    //         }
+    //         case 'updated': {
+    //           return {
+    //             elt: seeder,
+    //             type: 'updated'
+    //           };
+    //         }
+    //       }
+    //       return;
+    //     }),
+    //     filter(isNonNulled)
+    //   );
+    // })());
 
 
     const notifiableServerSeeder$: Observable<Change<Seeder>> = (function observeNotifiableServerSeeders() {
       return from([
         serverSeeder$,
-        notifiableSeeder$,
+        processAllEntities(notifiableSeedersStoreDeferred),
         activePlayer$
       ] as Observable<Change<Seeder>>[]).pipe(
         map(mapChange(elt => elt.steam_id)),
         // ensure
         trackUnifiedState([true, true, false]),
-        mapChange(steamId => allSeedersByDiscordId.get(steamId) as Seeder)
+        withLatestFrom(seederStoreDeferred),
+        map(([change, seeders]) => {
+          const seeder = seeders.state.steamId.get(change.elt) as Seeder;
+          return {
+            type: change.type,
+            elt: seeder
+          };
+        })
       );
     })();
+
+    // pretty please only push values to this inside of trackAndPersistSeedSessions
+    const activeSeedSessionSubject = new BehaviorSubject<SeedSessionLog | null>(null);
+
     const notAttendingSeederSubject = new Subject<Seeder>();
-    const {
-      seedSession$,
-      activeSeedSessionSubject
-    } = (function trackAndPersistSeedSessions() {
+    (function trackAndPersistSeedSessions() {
       const notAttendingChange$ = notAttendingSeederSubject.pipe(
         map(seeder => ({
           type: 'removed',
@@ -394,21 +532,19 @@ export function setupServer(server: Server,
 
       const chatCommandInteraction$ = flattenDeferred(discordClientDeferred.then(c => getChatCommandInteraction(c)));
 
-      const activeSeedSessionSubject = new BehaviorSubject<SeedSessionLog | null>(null);
       let activeSessionId$ = activeSeedSessionSubject.pipe(map(session => session?.id || null));
-
       const invokedStartSession$: Observable<SessionStartCommandOptions> = (function listenForStartSessionCommand() {
         return chatCommandInteraction$.pipe(
           withLatestFrom(activeSessionId$),
           map(([interaction, activeSessionId]): SessionStartCommandOptions | null => {
-            if (interaction.commandName !== commandNames.startModerated.name) return null;
-            const serverId = Number(interaction.options.getString(commandNames.startModerated.options.server));
+            if (interaction.commandName !== commandNames.startSeedingSession.name) return null;
+            const serverId = Number(interaction.options.getString(commandNames.startSeedingSession.options.server));
             if (server.id !== serverId) return null;
             const options: Partial<SessionStartCommandOptions> = {};
 
             if (activeSessionId) throw new InteractionError('Already in active session!', interaction);
 
-            let gracePeriod = interaction.options.getString(commandNames.startModerated.options.gracePeriod);
+            let gracePeriod = interaction.options.getString(commandNames.startSeedingSession.options.gracePeriod);
             gracePeriod ||= config.default_grace_period;
             try {
               const gracePeriodSpan = parseTimespan(gracePeriod);
@@ -420,7 +556,7 @@ export function setupServer(server: Server,
               throw new InteractionError(`Unable to parse given grace period (${gracePeriod})`, interaction);
             }
 
-            const failureImpossible = interaction.options.getBoolean(commandNames.startModerated.options.failureImpossible);
+            const failureImpossible = interaction.options.getBoolean(commandNames.startSeedingSession.options.failureImpossible);
             if (failureImpossible === null) {
               options.failureImpossible = false;
             } else {
@@ -451,7 +587,8 @@ export function setupServer(server: Server,
 
       let activeSessionOptions: SessionStartCommandOptions | null = null;
 
-      // session is set / is being set / not yet set
+      // locked while inserting session log on the database
+      const activeSessionMtx = new Mutex();
 
       const generatedSeedSessionEvent$: Observable<SeedSessionEvent> = combineLatest([
         activePlayer$.pipe(scanChangesToMap(elt => elt.steam_id)),
@@ -459,7 +596,12 @@ export function setupServer(server: Server,
         inGracePeriod$,
         activeSessionId$
       ]).pipe(
-        switchMap(async ([players, seeders, inGracePeriod, activeSessionId]) => inGracePeriod ? null : checkForAutomaticSessionChange(server, players, seeders, !!activeSessionId)),
+        observeOn(asyncScheduler),
+        map(([players, seeders, inGracePeriod, activeSessionId]) => {
+          // if the mutex is locked, that means we'll get a different activeSessionId to use instead soon
+          if (inGracePeriod || activeSessionMtx.isLocked()) return null;
+          return checkForAutomaticSessionChange(server, players, seeders, !!activeSessionId);
+        }),
         filter(isNonNulled)
       );
 
@@ -473,14 +615,14 @@ export function setupServer(server: Server,
         invokedEndSession$.pipe(mapTo({ type: SeedSessionEventType.Cancelled } as SeedSessionEvent))
       ).pipe(mergeAll(),
         // filter out failure events when options.failureImpossible is set
+        filter((event) => !(event.type === SeedSessionEventType.Failure && activeSessionOptions?.failureImpossible)),
         tap((event) => {
           logger.info(`posted new session event: ${ppObj({ type: enumRepr(SeedSessionEventType, event.type) })}`, event);
         }),
-        filter((event) => !(event.type === SeedSessionEventType.Failure && activeSessionOptions?.failureImpossible))
+        share()
       );
 
 
-      const activeSessionMtx = new Mutex();
       const persistedChange$ = seedSessionEvent$.pipe(
         withLatestFrom(activeSessionId$),
         concatMap(async ([event, activeSessionId]) => {
@@ -490,7 +632,7 @@ export function setupServer(server: Server,
             switch (event.type) {
               case SeedSessionEventType.Started: {
                 if (activeSessionId) throw new Error(`activeSessionId already set when success SeedSessionEvent sent: ${activeSessionId}`);
-                const [row] = await schema.seed_session_log(db).insert({
+                const [row] = await schema.seed_session_log(dbPool).insert({
                   server_id: server.id,
                   start_time: new Date(),
                   failure_impossible: event.options.failureImpossible,
@@ -505,7 +647,7 @@ export function setupServer(server: Server,
               }
               case SeedSessionEventType.Success: {
                 if (!activeSeedSessionSubject) throw new Error(`activeSessionId not set when success SeedSessionEvent sent`);
-                const [row] = await schema.seed_session_log(db).update({ id: activeSessionId as number }, {
+                const [row] = await schema.seed_session_log(dbPool).update({ id: activeSessionId as number }, {
                   end_time: new Date(),
                   end_reason: SeedSessionEndReason.Success
                 });
@@ -518,7 +660,7 @@ export function setupServer(server: Server,
               }
               case SeedSessionEventType.Failure: {
                 if (!activeSessionId) throw new Error(`activeSessionId already set when failure SeedSessionEvent sent`);
-                const [row] = await schema.seed_session_log(db).update({ id: activeSessionId as number }, {
+                const [row] = await schema.seed_session_log(dbPool).update({ id: activeSessionId as number }, {
                   end_time: new Date(),
                   end_reason: SeedSessionEndReason.Failure
                 });
@@ -531,7 +673,7 @@ export function setupServer(server: Server,
               }
               case SeedSessionEventType.Cancelled: {
                 if (!activeSessionId) throw new Error(`activeSessionId already set when abort SeedSessionEvent sent`);
-                const [row] = await schema.seed_session_log(db).update({ id: activeSessionId as number }, {
+                const [row] = await schema.seed_session_log(dbPool).update({ id: activeSessionId as number }, {
                   end_time: new Date(),
                   end_reason: SeedSessionEndReason.Cancelled
                 });
@@ -549,38 +691,26 @@ export function setupServer(server: Server,
             activeSessionMtx.release();
           }
           return change;
-        })
+        }),
+        tap(change => logger.info(ppObj(change))),
+        share()
       );
-      createMasterSubscriptionEntry(persistedChange$, { context: 'persistedSeedSessionChange' });
+      createObserverTarget(persistedChange$, { context: 'persistedSeedSessionChange' });
 
       persistedChange$.pipe(
         filter(change => change.type !== 'updated'),
         map(change => change.type === 'added' ? change.elt : null)
       ).subscribe(activeSeedSessionSubject);
 
-      return {
-        seedSession$: persistedChange$,
-        activeSeedSessionSubject: activeSeedSessionSubject
-      };
+      seedSession$ = persistedChange$;
     })();
 
-
-    // manage completeion of seed sessions
-    createMasterSubscriptionEntry(from(seedSession$.toPromise().finally(async () => {
-      const session = activeSeedSessionSubject.value;
-      if (!session) return;
-      await seed_session_log(db).update({ id: session.id }, {
-        end_reason: EndReason.Error,
-        end_time: new Date()
-      });
-      logger.warn('Closed off active seed session due to unforseen error');
-    })), { context: 'ManageCompletionOfSeedSessions' });
 
     (function updateDisplayedServerDetails() {
       const msgMutex: Mutex = new Mutex();
 
       (function updateDisplayedMapName() {
-        createMasterSubscriptionEntry(flattenDeferred(deferredGameServerUpdate$.then(update => update)), { context: 'updateDisplayedMapName' }, {
+        createObserverTarget(gameServerUpdate$.pipe(changeOfType('updated')), { context: 'updateDisplayedMapName' }, {
           next: (gameServer) =>
             msgMutex.runExclusive(async () => {
               const msg = await mainServerMessageDeferred;
@@ -591,7 +721,7 @@ export function setupServer(server: Server,
       })();
 
       (function updateDisplayedPlayerCount() {
-        createMasterSubscriptionEntry(activePlayer$, { context: 'updateDisplayedPlayerCount' }, {
+        createObserverTarget(activePlayer$, { context: 'updateDisplayedPlayerCount' }, {
           next: () =>
             msgMutex.runExclusive(async () => {
               const msg = await mainServerMessageDeferred;
@@ -601,77 +731,79 @@ export function setupServer(server: Server,
       })();
     })();
 
+
     (function manageSeedSessionMessages() {
-      const generatedMessages = new Set<bigint>();
-
-      createMasterSubscriptionEntry(seedSession$.pipe(
+      const sessionLifecycleMessageSaga$ = seedSession$.pipe(
         changeOfType('added'),
-        concatMap(async session => {
-          const serverDetails = (await deferredGameServerUpdate$).value;
-          let options = seedSessionStart(serverDetails.name, activePlayers.size, server.seed_success_player_count, session.start_time);
-          const msg = await sendManagedMessage(options, ServerMessageRole.SessionStart);
-          generatedMessages.add(BigInt(msg.id));
-        })
-      ), { context: 'seedSessionStarted' });
+        mergeMap(async function manageMessagesForSession(startedSession) {
+          const onEnded = seedSession$.pipe(changeOfType('removed'), filter(log => log.id === startedSession.id), first()).toPromise();
+          const generatedMessages = new Set<bigint>();
 
-      createMasterSubscriptionEntry(seedSession$.pipe(
-        changeOfType('removed')
-      ), { context: 'seedSessionEnded' }, {
-        next: async (sessionLog) => {
-          let serverName = (await getFirstAfterDeferred(deferredGameServerUpdate$)).name;
-          let msg: Message;
-          switch (sessionLog.end_reason as number) {
-            case SeedSessionEndReason.Failure: {
-              msg = await sendManagedMessage(`Seeding ${serverName} failed. Better luck next time!`, ServerMessageRole.SessionEnded);
-              break;
+          await (async function sendStartSessionMessage() {
+            const serverDetails = await getGameServerDetails();
+            let options = seedSessionStart(serverDetails.name, activePlayers.size, server.seed_success_player_count, startedSession.start_time);
+            const msg = await sendManagedMessage(options, ServerMessageRole.SessionStart);
+            generatedMessages.add(BigInt(msg.id));
+          })();
+
+
+          await (function sendPlayerJoinedMessagesUntilSessionEnded() {
+            return activePlayer$.pipe(
+              changeOfType('added'),
+              takeUntil(onEnded),
+              mergeMap(async (player) => {
+                const playersLeft = server.seed_success_player_count - activePlayers.size;
+                let msgOptions = playerJoinedSession(player.name, playersLeft);
+                const msg = await sendManagedMessage(msgOptions, ServerMessageRole.PlayerJoined);
+                generatedMessages.add(BigInt(msg.id));
+              })
+            ).toPromise();
+          })();
+
+          const removedSession = await onEnded;
+          await (async function sendEndingMessage() {
+            let serverName = (await getGameServerDetails()).name;
+            let msg: Message;
+            switch (removedSession!.end_reason as number) {
+              case SeedSessionEndReason.Failure: {
+                msg = await sendManagedMessage(`Seeding ${serverName} failed. Better luck next time!`, ServerMessageRole.SessionEnded);
+                break;
+              }
+              case SeedSessionEndReason.Cancelled: {
+                msg = await sendManagedMessage(`Seeding ${serverName} was cancelled.`, ServerMessageRole.SessionEnded);
+                break;
+              }
+              case SeedSessionEndReason.Success: {
+                msg = await sendManagedMessage(`Seeding ${serverName} Succeeded! Yay!`, ServerMessageRole.SessionEnded);
+                break;
+              }
+              default: {
+                throw new Error('unhandled seedsession end reason ' + enumRepr(SeedSessionEndReason, removedSession!.end_reason as number));
+              }
             }
-            case SeedSessionEndReason.Cancelled: {
-              msg = await sendManagedMessage(`Seeding ${serverName} was cancelled.`, ServerMessageRole.SessionEnded);
-              break;
-            }
-            case SeedSessionEndReason.Success: {
-              msg = await sendManagedMessage(`Seeding ${serverName} Succeeded! Yay!`, ServerMessageRole.SessionEnded);
-              break;
-            }
-            default: {
-              throw new Error('unhandled end reason ' + enumRepr(SeedSessionEndReason, sessionLog.end_reason as number));
-            }
-          }
-          generatedMessages.add(BigInt(msg.id));
-          setTimeout(minutesToMilliseconds(1)).then(async () => {
+            generatedMessages.add(BigInt(msg.id));
+          })();
+
+          await (async function deleteGeneratedMessages() {
             if (config.debug?.delete_stale_messages === false) return;
+            await setTimeout(minutesToMilliseconds(1));
             await Promise.all([...generatedMessages.values()].map(async id => {
               await removeManagedMessage(id);
-              generatedMessages.delete(id);
             }));
-          });
-        }
-      });
-
-      createMasterSubscriptionEntry(activePlayer$.pipe(
-        changeOfType('added'),
-        withLatestFrom(activeSeedSessionSubject),
-        mergeMap(async ([player, session]) => {
-          if (!session) return;
-          // const playersLeft = active
-          const playersLeft = server.seed_success_player_count - activePlayers.size;
-          let msgOptions = playerJoinedSession(player.name, playersLeft);
-          const msg = await sendManagedMessage(msgOptions, ServerMessageRole.PlayerJoined);
-          generatedMessages.add(BigInt(msg.id));
+          })();
         })
-      ), { context: 'addedSeedSession' });
-
+      );
+      createObserverTarget(sessionLifecycleMessageSaga$, { context: 'sessionLifecycleMessageSaga$' });
     })();
 
     const notifiedSeeder$ = (function notifyAvailableSeeders(): Observable<Seeder> {
-      const deferredGuild = Promise.all([discordClientDeferred, tenantDeferred]).then(([client, tenant]) => client.guilds.fetch(tenant.guild_id.toString()));
 
       return seedSession$.pipe(
         changeOfType('added'),
         withLatestFrom(notifiableServerSeeder$.pipe(scanChangesToMap(seeder => seeder.discord_id))),
-        mergeMap(async ([session, seeders]) => {
-          const serverName = (await deferredGameServerUpdate$).value.name;
-          const sent = [...seeders.values()].map(seeder => deferredGuild
+        mergeMap(async ([addedSession, seeders]) => {
+          const serverName = (await getGameServerDetails()).name;
+          const sent = [...seeders.values()].map(seeder => getInstanceGuild()
             .then(guild => guild.members.fetch(seeder.discord_id.toString()))
             .then(member => member.send('Time to seed ' + serverName))
             .then(() => seeder)
@@ -683,7 +815,7 @@ export function setupServer(server: Server,
         share()
       );
     })();
-    createMasterSubscriptionEntry(notifiedSeeder$, { context: 'notifiedSeeder' });
+    createObserverTarget(notifiedSeeder$, { context: 'notifiedSeeder' });
 
 
     (function trackNonResponsiveSeeders() {
@@ -703,12 +835,10 @@ export function setupServer(server: Server,
   })();
 
 
-  const gameServerUpdate$ = flattenDeferred(deferredGameServerUpdate$);
-
-
   return {
-    serverSeedSignupAttempt$: seedSignupAttempt$,
-    gameServerUpdate$
+    gameServerChange$: gameServerUpdate$,
+    serverSeedSignupChange$: seedSignUpChange$,
+    seedSession$: seedSession$
   };
 }
 

@@ -1,4 +1,5 @@
 import express from 'express';
+import {setTimeout} from 'timers/promises';
 import { readFileSync } from 'fs';
 import GameDig from 'gamedig';
 import { asapScheduler, Observable } from 'rxjs';
@@ -24,6 +25,8 @@ type SquadJSMessage = { time: Date; } & ({
 
 export async function queryGameServer(host: string, query_port: number): Promise<ServerDetails> {
   if (config.shim_squadjs) {
+    // avoid sync -> async discrepancies during testing
+    await setTimeout(200);
     return {
       name: 'test squad server',
       map: 'a map',
@@ -122,13 +125,14 @@ export function observeSquadServer(server: Server): Observable<TimedChange<RawPl
         server.close();
       };
     }).pipe(
-      auditChanges<RawPlayer, TimedChange<RawPlayer>>(elt => elt.steamID),
+      auditChanges<RawPlayer, string, TimedChange<RawPlayer>>(elt => elt.steamID),
       // ensure all subscribers that subscribe during this synchronous context get all events
       observeOn(asapScheduler),
       share(),
       registerInputObservable(observeSquadLogger.defaultMeta)
     );
   }
+
   return new Observable<TimedChange<RawPlayer>>((s) => {
     observeSquadLogger.info('connecting to websocket ', server.squadjs_ws_addr);
     const ws = new WebSocket(server.squadjs_ws_addr);
@@ -168,5 +172,5 @@ export function observeSquadServer(server: Server): Observable<TimedChange<RawPl
       ws.off('close', closeListener);
       ws.off('message', messageListener);
     };
-  }).pipe(registerInputObservable(observeSquadLogger.defaultMeta), auditChanges<RawPlayer, TimedChange<RawPlayer>>(elt => elt.steamID));
+  }).pipe(registerInputObservable(observeSquadLogger.defaultMeta), auditChanges<RawPlayer, string, TimedChange<RawPlayer>>(elt => elt.steamID));
 }

@@ -17,6 +17,7 @@ import {
   filter
 } from 'rxjs/operators';
 import { registerInputObservable } from '../cleanup';
+import { discordClientDeferred } from '../discordClient';
 import { logger, ppObj } from '../globalServices/logger';
 import { flattenDeferred, Change } from './asyncUtils';
 import { isNonNulled } from './typeUtils';
@@ -94,20 +95,14 @@ export function observeMessageReactions(client: discord.Client, message: Message
 }
 
 
-export function getPresenceObservable(client: discord.Client): Observable<discord.Presence> {
-  return new Observable<discord.Presence>(s => {
-
-    function listener(oldPresence: discord.Presence | null, newPresence: discord.Presence) {
-      if (!newPresence) return;
-      s.next(newPresence);
-    }
-
-    client.on('presenceUpdate', listener);
-
-    return () => {
-      client.off('presenceUpdate', listener);
-    };
-  }).pipe(registerInputObservable({ context: 'getPresenceObservable' }));
+export function getPresenceObservable(): Observable<discord.Presence> {
+  const presenceUpdate$ = flattenDeferred(discordClientDeferred.then(client => fromEvent(client, 'presenceUpdate') as Observable<[oldPresence: discord.Presence | null, newPresence: discord.Presence]>));
+  return presenceUpdate$.pipe(
+    map(([newPresence]) => newPresence || null),
+    filter(isNonNulled),
+    share(),
+    registerInputObservable({ context: 'getPresenceObservable' })
+  );
 }
 
 // a specific thrown error that occurs during a discord interaction that we want to notify the user about
