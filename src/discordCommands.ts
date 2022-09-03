@@ -69,7 +69,7 @@ export async function registerDiscordCommands() {
   processAllEntities(serverStoreDeferred).subscribe(change => {
     logger.info(change)
   });
-  const serverList$ = processAllEntities(serverStoreDeferred).pipe(withLatestFrom(serverStoreDeferred), map(([_, servers]) => [...servers.state.id.values()]));
+  const serverList$= (await serverStoreDeferred).trackAllEntities().pipe(withLatestFrom(serverStoreDeferred), map(([_, servers]) => [...servers.state.id.values()]));
   const currentlySeedingServerList$ = processAllEntities(activeSeedSessionsDeferred).pipe(withLatestFrom(serverStoreDeferred), map(([_, servers]) => [...servers.state.id.values()]));
 
   // register start seed session command

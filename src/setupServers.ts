@@ -75,7 +75,6 @@ import {
   observeMessageReactions
 } from './lib/discordUtils';
 import {
-  createEntityStore,
   EntityStore,
   processAllEntities, IndexCollection
 } from './lib/entityStore';
@@ -108,6 +107,7 @@ import { observeSquadServer, queryGameServer } from './squadServer';
 const serverIndexes = {
   id: (server: ServerWithDetails) => server.id
 };
+type ServerIndexKeys = keyof (typeof serverIndexes);
 
 export type ServerEntityStore = EntityStore<'id', number, ServerWithDetails>;
 const _serversDeferred = new Future<ServerEntityStore>();
@@ -176,9 +176,16 @@ export async function setupServers() {
     mergedSeedSession$ = merge(mergedSeedSession$, seedSession$);
   }
 
-  _serversDeferred.resolve(createEntityStore(mergedServerChange$, serverIndexes));
-  _activeSeedSessionsDeferred.resolve(createEntityStore(mergedSeedSession$, activeSeedSessionIndexes as IndexCollection<keyof typeof activeSeedSessionIndexes, number, SeedSessionLog>));
-  _signUpReactions.resolve(createEntityStore(mergedSignup$, signUpIndexes));
+  _serversDeferred.resolve(new EntityStore(mergedServerChange$, serverIndexes, 'servers'));
+
+  _activeSeedSessionsDeferred.resolve(new EntityStore(
+    mergedSeedSession$,
+    activeSeedSessionIndexes as IndexCollection<keyof typeof activeSeedSessionIndexes, number,
+      SeedSessionLog>,
+    'activeSeedSessions'
+  ).setPrimaryIndex('id'));
+
+  _signUpReactions.resolve(new EntityStore(mergedSignup$, signUpIndexes, 'signUpReactions').setPrimaryIndex('serverId'));
 
   // manage completeion of seed sessions
   createObserverTarget(from(mergedSeedSession$.toPromise().finally(async () => {

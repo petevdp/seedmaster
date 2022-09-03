@@ -54,7 +54,6 @@ import discord, {
   SelectMenuInteraction, TextChannel, TextInputBuilder, TextInputStyle
 } from 'discord.js';
 import {
-  createEntityStore,
   EntityStore,
   IndexCollection
 } from './lib/entityStore';
@@ -253,7 +252,7 @@ export function setupSeeders() {
   })();
 
   const seeder$ = of(existingSeeder$, newSeeder$, removedSeeder$, updatedSeeder$).pipe(concatAll());
-  _seedersDeferred.resolve(createEntityStore(seeder$, seederIndexes));
+  _seedersDeferred.resolve(new EntityStore(seeder$, seederIndexes, 'seeders').setPrimaryIndex('discordId'));
 
   const notifiableSeeder$: Observable<Change<Seeder>> = (function observeNotifiableSeeders() {
     return seeder$.pipe(mergeMap((seederChange) => {
@@ -277,7 +276,7 @@ export function setupSeeders() {
       }
     }));
   })();
-  _notifiableSeederStoreDeferred.resolve(createEntityStore(notifiableSeeder$, seederIndexes));
+  _notifiableSeederStoreDeferred.resolve(new EntityStore(notifiableSeeder$, seederIndexes, 'notifiableSeeders').setPrimaryIndex('discordId'));
 }
 
 function observeNotifiable(discordId: bigint, steamId: bigint, notifySetting$: Observable<NotifyWhen>): Observable<boolean> {
