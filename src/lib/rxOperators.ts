@@ -1,3 +1,4 @@
+// this is here because webstorm is refusing to autocomplete rx operators for some reason
 export {
   skip,
   concatMap,
@@ -22,5 +23,6 @@ export {
   observeOn,
   combineLatestAll,
   scan,
-  shareReplay
+  shareReplay,
+  skipWhile
 } from 'rxjs/operators'

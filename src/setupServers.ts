@@ -76,7 +76,7 @@ import {
 } from './lib/discordUtils';
 import {
   EntityStore,
-  processAllEntities, IndexCollection
+  IndexCollection
 } from './lib/entityStore';
 import { Future } from './lib/future';
 import {
@@ -98,6 +98,7 @@ import {
   SessionStartCommandOptions
 } from './models';
 import {
+  filterNonSeederInteractions, filterNonSeederReactions,
   notifiableSeedersStoreDeferred,
   seederStoreDeferred
 } from './setupSeeders';
@@ -226,7 +227,7 @@ export function setupServer(server: Server) {
     ).pipe(shareReplay(1));
   })();
   gameServerUpdate$.subscribe((update) => {
-    logger.info('game server update: ', update);
+    logger.info('game server update: ', ppObj(update));
   });
 
   function getGameServerDetails() {
@@ -408,6 +409,7 @@ export function setupServer(server: Server) {
 
   const seedSignUpChange$: Observable<Change<SignUpReaction>> = (function observeSignupAttempts() {
     return messageReaction$.pipe(
+      filterNonSeederReactions(),
       mapChange((reaction): SignUpReaction => {
         return {
           serverId: server.id,
@@ -424,90 +426,34 @@ export function setupServer(server: Server) {
     const serverSeeder$ = seedSignUpChange$.pipe(
       changeOfType('added'),
       mergeMap(async (reactionAdded) => {
-        let seederStore = await seederStoreDeferred;
-        const seeder = seederStore.state.discordId.get(reactionAdded.discordUserId);
-        if (!seeder) {
-          const [{ count }] = (await dbPool.query(sql`SELECT COUNT(*)
-                                                      FROM users_prompted_for_signup
-                                                      WHERE discord_id ? ${reactionAdded.discordUserId}`)) as [{ count: bigint }];
-          if (count !== 0n) return null;
-          const guildMember = await (await getInstanceGuild()).members.fetch(reactionAdded.discordUserId.toString());
-          guildMember.send(signUpPromptMessage(guildMember, 'https://discord.com/channels/465971449954304000/1011993778787201125/1015395461374410812'));
-        }
 
+        let seederStore = await seederStoreDeferred;
+        let discordUserId = reactionAdded.discordUserId;
+        const seeder = seederStore.state.discordId.get(discordUserId);
+        if (!seeder) {
+        }
         const reactionRemoved = seedSignUpChange$.pipe(
           changeOfType('removed'),
-          filter(reaction => reaction.discordUserId === reactionAdded.discordUserId),
+          filter(reaction => reaction.discordUserId === discordUserId),
           first()
         ).toPromise();
 
+        const seederChanges = seederStore
+          .trackEntity(discordUserId, 'discordId', false)
+          .pipe(takeUntil(reactionRemoved));
 
-        const seederChanges = processAllEntities(seederStore)
-          .pipe(
-            filter(seederChange => seederChange.elt.discord_id === reactionAdded.discordUserId),
-
-            // keep listening until the reaction was removed or the seeder leaves
-            takeWhile(change => change.type !== 'removed'),
-            takeUntil(reactionRemoved)
-          );
         return seederChanges;
 
       }),
-      filter(isNonNulled)
+      filter(isNonNulled),
+      mergeAll()
     );
-
-
-    // const serverSeeder$: Observable<Change<Seeder>> = ((() => {
-    //   // listen for seeder reactions and track on the database
-    //   // let  = getFirstAfterDeferred(deferredServerMessage$);
-    //
-    //
-    //   return messageReaction$.pipe(
-    //     withLatestFrom(mainServerMessageDeferred, seederStoreDeferred),
-    //     mergeMap(async ([reactionChange, serverMessage, seeders]): Promise<Change<Seeder> | undefined> => {
-    //       const { reaction, userId } = reactionChange.elt;
-    //       if (reaction.message.id !== serverMessage.id) throw new Error('unable to locate server reaction message');
-    //       const seeder = seeders.state.discordId.get(BigInt(userId));
-    //       if (!seeder) return;
-    //       switch (reactionChange.type) {
-    //         case 'added': {
-    //           await schema.server_seeder(dbPool).insert({
-    //             server_id: server.id,
-    //             seeder_id: seeder.id
-    //           });
-    //           return {
-    //             elt: seeder,
-    //             type: 'added'
-    //           } as Change<Seeder>;
-    //         }
-    //         case 'removed': {
-    //           await schema.server_seeder(dbPool).delete({
-    //             server_id: server.id,
-    //             seeder_id: seeder.id
-    //           });
-    //           return {
-    //             elt: seeder,
-    //             type: 'removed'
-    //           };
-    //         }
-    //         case 'updated': {
-    //           return {
-    //             elt: seeder,
-    //             type: 'updated'
-    //           };
-    //         }
-    //       }
-    //       return;
-    //     }),
-    //     filter(isNonNulled)
-    //   );
-    // })());
 
 
     const notifiableServerSeeder$: Observable<Change<Seeder>> = (function observeNotifiableServerSeeders() {
       return from([
         serverSeeder$,
-        processAllEntities(notifiableSeedersStoreDeferred),
+        flattenDeferred(notifiableSeedersStoreDeferred.then(s => s.trackAllEntities())),
         activePlayer$
       ] as Observable<Change<Seeder>>[]).pipe(
         map(mapChange(elt => elt.steam_id)),

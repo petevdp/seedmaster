@@ -11,10 +11,9 @@ import { config } from './config';
 import { environment } from './globalServices/environment';
 import { logger } from './globalServices/logger';
 import { instanceTenantDeferred } from './instanceTenant';
-import { processAllEntities } from './lib/entityStore';
-import { tap } from './lib/rxOperators';
 import { ServerWithDetails } from './models';
 import { filter, map, mergeMap, withLatestFrom } from 'rxjs/operators';
+import { seederStoreDeferred } from './setupSeeders';
 import {
   activeSeedSessionsDeferred,
   serverStoreDeferred
@@ -66,11 +65,8 @@ export async function registerDiscordCommands() {
       logger.info(change)
     })
   })
-  processAllEntities(serverStoreDeferred).subscribe(change => {
-    logger.info(change)
-  });
   const serverList$= (await serverStoreDeferred).trackAllEntities().pipe(withLatestFrom(serverStoreDeferred), map(([_, servers]) => [...servers.state.id.values()]));
-  const currentlySeedingServerList$ = processAllEntities(activeSeedSessionsDeferred).pipe(withLatestFrom(serverStoreDeferred), map(([_, servers]) => [...servers.state.id.values()]));
+  const currentlySeedingServerList$ = (await seederStoreDeferred).trackAllEntities().pipe(withLatestFrom(serverStoreDeferred), map(([_, servers]) => [...servers.state.id.values()]));
 
   // register start seed session command
   createObserverTarget(serverList$.pipe(

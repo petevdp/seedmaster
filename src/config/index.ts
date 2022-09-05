@@ -1,9 +1,9 @@
 import { logger } from '../globalServices/logger';
 import { Config, ConfigCodec } from './Config';
 import { readFileSync } from 'fs';
+import JSON5 from 'json5';
 
-
-const configRaw = JSON.parse(readFileSync('./config.json', 'utf-8'));
+const configRaw = JSON5.parse(readFileSync('./config.json5', 'utf-8'));
 
 export const config = configRaw as Config;
 

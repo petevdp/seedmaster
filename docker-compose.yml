@@ -2,17 +2,17 @@ version: '3.2'
 volumes:
   squad_data:
 services:
-  app:
-    image: .
-    environment:
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
-      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
-      DATABASE_URL: ${DATABASE_URL}
-      STEAM_API_KEY: ${STEAM_API_KEY}
-      NODE_ENV: ${NODE_ENV}
-    ports:
-      - 2000:2000
-
+#  app:
+#    image: .
+#    environment:
+#      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
+#      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
+#      DATABASE_URL: ${DATABASE_URL}
+#      STEAM_API_KEY: ${STEAM_API_KEY}
+#      NODE_ENV: ${NODE_ENV}
+#    ports:
+#      - 2000:2000
+#
   db:
     image: postgres
     volumes:
@@ -32,11 +32,11 @@ services:
     stdin_open: true
     tty: true
     restart: always
-#    volumes:
-#      - type: bind
-#        source: ./squadlogs
-#        target: /home/steam/squad-dedicated/SquadGame/Saved/Logs
-#      - squad_data:/home/steam/squad-dedicated/
+    volumes:
+      - type: bind
+        source: ./squadlogs
+        target: /home/steam/squad-dedicated/SquadGame/Saved/Logs
+      - squad_data:/home/steam/squad-dedicated/
 
     environment:
       - PORT=7787

@@ -1,8 +1,8 @@
 import express from 'express';
-import {setTimeout} from 'timers/promises';
+import { setTimeout } from 'timers/promises';
 import { readFileSync } from 'fs';
 import GameDig from 'gamedig';
-import { asapScheduler, Observable } from 'rxjs';
+import { asapScheduler, fromEvent, Observable, firstValueFrom } from 'rxjs';
 import { observeOn, share } from 'rxjs/operators';
 import WebSocket from 'ws';
 import { Server } from './__generated__';
@@ -10,17 +10,12 @@ import { registerInputObservable } from './cleanup';
 import { config } from './config';
 import { RawPlayer } from './config/Config';
 import { logger as masterLogger } from './globalServices/logger';
-import { auditChanges, Change, TimedChange } from './lib/asyncUtils';
+import { auditChanges, Change, mapChange, TimedChange } from './lib/asyncUtils';
+import { map, takeUntil } from './lib/rxOperators';
 import { ServerDetails, ServerWithDetails } from './models';
 
 
-type SquadJSMessage = { time: Date; } & ({
-  type: 'init',
-  players: RawPlayer[];
-} | {
-  type: 'playerJoined' | 'playerLeft'
-  player: RawPlayer;
-});
+type SquadJSMessage = TimedChange<RawPlayer>;
 
 
 export async function queryGameServer(host: string, query_port: number): Promise<ServerDetails> {
@@ -133,44 +128,29 @@ export function observeSquadServer(server: Server): Observable<TimedChange<RawPl
     );
   }
 
-  return new Observable<TimedChange<RawPlayer>>((s) => {
+  observeSquadLogger.info('connecting to websocket ', server.squadjs_ws_addr);
+
+  let playerChange$ = new Observable<TimedChange<RawPlayer>>((subscriber) => {
     observeSquadLogger.info('connecting to websocket ', server.squadjs_ws_addr);
     const ws = new WebSocket(server.squadjs_ws_addr);
+    const closed$ = firstValueFrom(fromEvent(ws, 'close'));
 
-    function openListener() {
-      observeSquadLogger.info('Socket opened with ', server.squadjs_ws_addr);
-    }
+    fromEvent(ws, 'open')
+      .pipe(takeUntil(closed$))
+      .subscribe(() => {
+        observeSquadLogger.info('Socket opened with ', server.squadjs_ws_addr);
+      });
 
-    function closeListener() {
-      s.complete();
-    }
+    (fromEvent(ws, 'message') as Observable<string>)
+      .pipe(
+        takeUntil(closed$),
+        map(msg => JSON.parse(msg) as SquadJSMessage)
+      )
+      .subscribe(subscriber);
+  });
 
-    function messageListener(msg: string) {
-      const message = JSON.parse(msg) as SquadJSMessage;
-      let type: Change<unknown>['type'];
-
-      if (message.type === 'playerJoined') {
-        s.next({ type: 'added', elt: message.player, time: message.time });
-      } else if (message.type === 'playerLeft') {
-        s.next({ type: 'removed', elt: message.player, time: message.time });
-      } else if (message.type === 'init') {
-        for (let player of message.players) {
-          s.next({ type: 'added', elt: player, time: message.time });
-        }
-      }
-
-    }
-
-    ws.on('open', openListener);
-    ws.on('close', closeListener);
-    ws.on('message', messageListener);
-
-
-    return () => {
-      ws.close();
-      ws.off('open', openListener);
-      ws.off('close', closeListener);
-      ws.off('message', messageListener);
-    };
-  }).pipe(registerInputObservable(observeSquadLogger.defaultMeta), auditChanges<RawPlayer, string, TimedChange<RawPlayer>>(elt => elt.steamID));
+  return playerChange$.pipe(
+    auditChanges<RawPlayer, string, TimedChange<RawPlayer>>(elt => elt.steamID),
+    registerInputObservable(observeSquadLogger.defaultMeta)
+  );
 }

@@ -4,8 +4,9 @@ import winston, {
   LogCallback,
   LogEntry,
   Logger,
-  LogMethod
+  LogMethod,
 } from 'winston';
+import {MESSAGE} from 'triple-beam';
 import { environment, NodeEnv } from './environment';
 import { prettyPrint } from '@base2/pretty-print-object';
 import { Format, format } from 'logform';
@@ -76,19 +77,28 @@ export class MetadataError extends Error {
   }
 }
 
+
 export const logger: LoggerWithMeta<LoggerMetadata> = winston.createLogger({
   level: 'debug',
-  format: format.combine(format.timestamp(), format.metadata(), format.json(), format.colorize()),
+  format: format.combine(
+    format.timestamp(),
+    format.metadata(),
+    format.errors(),
+    format.json()
+  ),
   defaultMeta: { context: 'default' },
   transports: [
     new winston.transports.File({
       filename: './logs/error.log',
+      handleExceptions: true,
       level: 'error'
     }),
-    new winston.transports.File({ filename: './logs/combined.log' })
+    new winston.transports.File({
+      filename: './logs/combined.log',
+      handleExceptions: true
+    })
   ]
 });
-
 
 // const makeSerializable = (obj: any) => ({ })
 
@@ -108,6 +118,22 @@ export const steamClient = new SteamAPI(environment.STEAM_API_KEY);
 
 
 
+
+
 if (environment.NODE_ENV !== NodeEnv.PRODUCTION) {
-  logger.add(new winston.transports.Console({ format: format.combine(logger.format, format.cli()) }));
+  const pipeFormat = format((info: any, opts: any) => {
+    let line = `$${info.level}|${info.metadata.context}|${info.message}`;
+    if (info.error) {
+      line += `\n${info.error}\n`;
+    }
+    info[MESSAGE] = line;
+    return info;
+  });
+  const consoleFormat = format.combine(
+    format.colorize(),
+    pipeFormat(),
+  );
+
+
+  logger.add(new winston.transports.Console({ format: consoleFormat, debugStdout: true }));
 }

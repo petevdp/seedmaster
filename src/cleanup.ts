@@ -88,6 +88,7 @@ export function createObserverTarget<T>(observable: Observable<T>, meta: LoggerM
   const errorHandledObservable = observable.pipe(
     catchError((err, o) => {
       baseLogger.error(err, { ...meta, category: 'masterSub' });
+      // ensure we remove entries where the source observable completes
       throw err;
     })
   );
@@ -118,10 +119,10 @@ export function getObserverCountRepr$(): Observable<string> {
 
 export function registerInputObservable<T>(metadata: LoggerMetadata) {
   const inputObservableLogger = baseLogger.child({
-    ...metadata,
+    context: metadata.context,
     category: 'inputObservable'
   });
-  inputObservableLogger.info(`registered input observable ${metadata.context}`);
+  inputObservableLogger.info(`registered input observable ${metadata.context}`, metadata);
   return (observable: Observable<T>): Observable<T> => {
     const out = observable.pipe(takeUntil(flushInputs));
     createObserverTarget(out, metadata, { complete: () => inputObservableLogger.info(`Completed input observable ${metadata.context}`) });

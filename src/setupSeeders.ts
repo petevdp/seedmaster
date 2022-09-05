@@ -1,29 +1,37 @@
 import { sql } from '@databases/pg';
 import { DiscordAPIError } from '@discordjs/rest';
 import { Mutex } from 'async-mutex';
+import parseHumanDate from 'parse-human-date';
+import discord, {
+  ActivityType,
+  ButtonInteraction,
+  Interaction,
+  Message,
+  ModalSubmitInteraction,
+  SelectMenuInteraction,
+  TextChannel
+} from 'discord.js';
 import {
-  Connectable,
-  from,
-  Observable,
+  combineLatest, concat,
   EMPTY,
-  of,
-  connectable,
-  combineLatest
+  from,
+  merge,
+  Observable,
+  Observer,
+  of
 } from 'rxjs';
 import {
-  map,
-  tap,
-  distinct,
-  mergeMap,
+  catchError,
+  concatAll,
   concatMap,
+  distinct,
+  filter,
+  map,
+  mergeAll,
+  mergeMap,
   share,
   startWith,
-  catchError,
-  mergeAll,
-  withLatestFrom,
-  filter,
-  takeWhile,
-  concatAll
+  tap
 } from 'rxjs/operators';
 import { Seeder } from './__generated__';
 import { createObserverTarget } from './cleanup';
@@ -31,35 +39,35 @@ import { config } from './config';
 import { dbPool, schema } from './db';
 import { discordClientDeferred } from './discordClient';
 import {
+  controlPanelMessage,
   mainSignupMessage,
-  messageButtonIds,
-  signUpModal, signupModalIds
+  messageButtonIds, pauseNotificationsModal, pauseNotificationsModalIds,
+  signUpModal,
+  signupModalIds, signUpPromptMessage,
+  welcomeMessage
 } from './discordComponents';
 import { logger, MetadataError, steamClient } from './globalServices/logger';
 import { getInstanceGuild, instanceTenantDeferred } from './instanceTenant';
+import { Change, flattenDeferred, getElt, toChange } from './lib/asyncUtils';
 import {
-  Change, flattenDeferred
-} from './lib/asyncUtils';
-import {
+  catchInteractionError,
   getInteractionObservable,
   getPresenceObservable,
-  InteractionError
+  InteractionError,
+  isButtonInteraction,
+  isModalSubmissionInteraction,
+  isSelectObservable, ReactionChange
 } from './lib/discordUtils';
-import discord, {
-  ActionRowBuilder, ActivityType, ButtonInteraction,
-  Interaction,
-  Message,
-  ModalActionRowComponentBuilder, ModalBuilder,
-  ModalSubmitInteraction,
-  SelectMenuInteraction, TextChannel, TextInputBuilder, TextInputStyle
-} from 'discord.js';
 import {
   EntityStore,
+  getIdentityIndex, IdentityIndex,
   IndexCollection
 } from './lib/entityStore';
 import { Future } from './lib/future';
-import { enumRepr, isNonNulled } from './lib/typeUtils';
+import { endWith, skipWhile, withLatestFrom } from './lib/rxOperators';
+import { enumRepr, isDefined, isNonNulled } from './lib/typeUtils';
 import { NotifyWhen } from './models';
+import compareAsc from 'date-fns/compareAsc';
 
 type indexLabels = 'discordId' | 'steamId'
 const seederIndexes: IndexCollection<indexLabels, bigint, Seeder> = {
@@ -70,8 +78,9 @@ type SeederEntityStore = EntityStore<indexLabels, bigint, Seeder>;
 const _seedersDeferred = new Future<SeederEntityStore>();
 export const seederStoreDeferred = _seedersDeferred as Promise<SeederEntityStore>;
 
-const _notifiableSeederStoreDeferred = new Future<SeederEntityStore>();
-export const notifiableSeedersStoreDeferred = _notifiableSeederStoreDeferred as Promise<SeederEntityStore>;
+type NotifiableSeederStore = EntityStore<'identity', bigint, bigint>;
+const _notifiableSeederStoreDeferred = new Future<NotifiableSeederStore>();
+export const notifiableSeedersStoreDeferred = _notifiableSeederStoreDeferred as Promise<NotifiableSeederStore>;
 
 
 export function setupSeeders() {
@@ -87,7 +96,7 @@ export function setupSeeders() {
     return { seeding: role };
   })();
 
-  let deferredMainSignUpMessage: Promise<Message> = (async function ensureSignupMessageCreated() {
+  (async function ensureSignupMessageCreated() {
     const discordClient = await discordClientDeferred;
     const [instanceTenant, channel] = await Promise.all([instanceTenantDeferred, discordClient.channels.fetch(config.seeding_channel_id)]);
     if (!channel!.isTextBased()) {
@@ -129,20 +138,24 @@ export function setupSeeders() {
     type: 'added',
     elt: s
   })));
-  let interaction$ = flattenDeferred(discordClientDeferred.then(c => getInteractionObservable(c)));
+  const interaction$ = flattenDeferred(discordClientDeferred.then(c => getInteractionObservable(c)))
+  let seederInteraction$ = interaction$.pipe(
+    filterNonSeederInteractions()
+  );
 
 
-  const submissionModals = new Set<string>();
   (function observeSignUpButtons() {
     const contextLogger = logger.child({ context: 'observeSignUpButton' });
     createObserverTarget(
-      interaction$,
+      interaction$.pipe(
+        filter(isButtonInteraction),
+        filter((interaction) => interaction.customId === messageButtonIds.signUp)
+      )
+      ,
       { context: 'observeSignUpButtons' },
       {
         // get seeder from interaction
-        next: async (rawInteraction) => {
-          const interaction = rawInteraction as ButtonInteraction;
-          if (interaction.customId !== messageButtonIds.signUp) return;
+        next: async (interaction) => {
           const alreadyExists = (await schema.seeder(dbPool).count({ discord_id: BigInt(interaction.user.id) })) > 0;
           if (alreadyExists) {
             await interaction.reply({
@@ -154,9 +167,8 @@ export function setupSeeders() {
 
 
           contextLogger.info('displaying sign up modal', { user: interaction.user.toJSON() });
-          const [modal, modalId] = signUpModal();
+          const [modal] = signUpModal();
           await interaction.showModal(modal);
-          submissionModals.add(modalId);
         }
       }
     );
@@ -165,17 +177,13 @@ export function setupSeeders() {
 
   const newSeeder$: Observable<Change<Seeder>> = (function observeSignUpModalSubmission() {
     const contextLogger = logger.child({ context: 'observeSignUpModalSubmission' });
-    const o = interaction$.pipe(
-      mergeMap(async (rawInteraction): Promise<Change<Seeder> | undefined> => {
-        if (!rawInteraction.isModalSubmit() || !submissionModals.has(rawInteraction.customId)) return;
-        submissionModals.delete(rawInteraction.customId);
-        const interaction = rawInteraction as ModalSubmitInteraction;
+    const o = seederInteraction$.pipe(
+      filter(isModalSubmissionInteraction),
+      filter(interaction => interaction.customId.startsWith(signupModalIds.startOfModalId)),
+      mergeMap(async (interaction): Promise<Change<Seeder> | null> => {
         const rawSteamId = interaction.fields.getTextInputValue(signupModalIds.steamId).trim();
         const steamId = BigInt(rawSteamId);
         if (!steamId) throw new InteractionError('steamId is invalid', interaction);
-
-        const notifyWhen = interaction.fields;
-
 
         try {
           await steamClient.getUserSummary([rawSteamId]);
@@ -186,9 +194,10 @@ export function setupSeeders() {
         }
 
         await schema.player(dbPool).insertOrIgnore({ steam_id: steamId });
+        let user: discord.GuildMember;
         try {
           const guild = await getInstanceGuild();
-          const user = await guild.members.fetch(interaction.user.id);
+          user = await guild.members.fetch(interaction.user.id);
           user.roles.add((await rolesDeferred).seeding);
           const [newSeeder] = await schema.seeder(dbPool).insert({
             steam_id: steamId,
@@ -196,6 +205,9 @@ export function setupSeeders() {
             notify_when: 1
           });
           contextLogger.info(`inserted seeder ${newSeeder.id}`, { newSeeder });
+
+          await user.send(welcomeMessage());
+          await user.send(controlPanelMessage());
           return {
             elt: newSeeder,
             type: 'added'
@@ -206,69 +218,155 @@ export function setupSeeders() {
           }
           throw err;
         }
-        return;
+
+
+        return null;
       }),
+      filter(isNonNulled),
       share(),
-      catchError((err, o) => o),
-      concatMap(m => !!m ? of(m) : EMPTY)
+      catchError((err, o) => o)
     );
     return o;
   })();
-  const updatedSeeder$: Observable<Change<Seeder>> = interaction$.pipe(
-    mergeMap(async (rawInteraction): Promise<Change<Seeder> | null> => {
-      const notifyWhen: NotifyWhen | undefined = (function extractNotifyWhenInteraction() {
-        if (!rawInteraction.isSelectMenu()) return;
-        const interaction = rawInteraction as Interaction as SelectMenuInteraction;
-        if (interaction.customId !== signupModalIds.notifyWhen) return;
-        const notifyWhen = parseInt(interaction.values[0]) as NotifyWhen;
-        return notifyWhen;
-      })();
 
-      if (!notifyWhen) return null;
+  let updatedSeeder$: Observable<Change<Seeder>>;
+  let removedSeeder$: Observable<Change<Seeder>>;
+  (function handleControlPanelInteractions() {
 
-      const seeder = (await seederStoreDeferred).state.discordId.get(BigInt(rawInteraction.user.id));
-      if (!seeder) throw new InteractionError(`You are not registered as a Seeder. Talk to ther server admins from ${(await getInstanceGuild()).name} for details.`, rawInteraction);
-      const [updated] = await schema.seeder(dbPool).update({ id: seeder.id }, { notify_when: notifyWhen });
-      return {
-        elt: updated,
-        type: 'updated'
-      };
-    }),
-    filter(isNonNulled)
-  );
+    (function handlePauseNotificationsButton() {
+      createObserverTarget(seederInteraction$.pipe(
+        filter(isButtonInteraction),
+        filter(interaction => interaction.customId === messageButtonIds.pauseNotifications),
+        mergeMap(async (interaction) => {
+          const modal = pauseNotificationsModal();
+          await interaction.showModal(modal);
+        })
+      ), { context: 'handlePauseNotificationsButton' });
+    })();
 
-  const removedSeeder$: Observable<Change<Seeder>> = (function observeUnregisterButton() {
-    return interaction$.pipe(
-      mergeMap(async (rawInteraction): Promise<Observable<Seeder>> => {
-        if (!rawInteraction.isButton() || (rawInteraction as ButtonInteraction).customId !== messageButtonIds.unregister) return EMPTY;
-        const discordId = BigInt(rawInteraction.user.id);
-        const seeder = (await seederStoreDeferred).state.discordId.get(discordId) as Seeder;
+    const seederUpdateMtx = new Mutex();
+
+    async function updateSeeder(discordId: bigint, toUpdate: Partial<Seeder>) {
+      await seederUpdateMtx.acquire();
+      try {
+        const [updated] = await schema.seeder(dbPool).update({ discord_id: discordId }, toUpdate);
+        return updated;
+      } finally {
+        seederUpdateMtx.release();
+      }
+    }
+
+    async function removeSeeder(discordId: bigint) {
+      await seederUpdateMtx.acquire();
+      try {
+        const seeder = (await seederStoreDeferred).state.discordId.get(discordId);
+        if (!seeder) return;
         await schema.seeder(dbPool).delete({ discord_id: discordId });
-        return !!seeder ? of(seeder) : EMPTY;
-      }),
-      mergeAll(),
-      map(elt => ({ type: 'removed', elt }))
-    );
+        return seeder;
+      } finally {
+        seederUpdateMtx.release();
+      }
+    }
+
+    const updateObservables: Observable<Seeder>[] = [];
+
+    updateObservables.push((function observeNotificationSettings() {
+      return seederInteraction$.pipe(
+        filter(isSelectObservable),
+        filter(interaction => interaction.customId === messageButtonIds.notifyWhen),
+        mergeMap(async function receiveNotificationSetting(interaction) {
+          const discordId = BigInt(interaction.user.id);
+          const notifyWhen = parseInt(interaction.values[0]) as NotifyWhen;
+          if (!isDefined(notifyWhen)) return null;
+          const updated = await updateSeeder(discordId, { notify_when: notifyWhen });
+          interaction.reply({
+            ephemeral: true,
+            content: `Received new notification setting! ${enumRepr(NotifyWhen, notifyWhen)}`
+          });
+          return updated;
+        }),
+        filter(isNonNulled),
+        catchInteractionError()
+      );
+    })());
+    updateObservables.push((function observePauseNotifications() {
+      return seederInteraction$.pipe(
+        filter(isModalSubmissionInteraction),
+        filter(interaction => interaction.customId.startsWith(pauseNotificationsModalIds.modalIdStart)),
+        mergeMap(async function receivePauseNotifications(interaction) {
+          const humanTime = interaction.fields.getTextInputValue(pauseNotificationsModalIds.time).trim();
+          if (!humanTime) throw new InteractionError('Please provide a value', interaction);
+          const date = parseHumanDate(humanTime);
+          const discordId = BigInt(interaction.user.id);
+          const updated = await updateSeeder(discordId, { notifications_paused_until: date });
+          interaction.reply({
+            ephemeral: true,
+            content: `Received! notifications will be resumed on ${date.toLocaleString()}`
+          });
+          return updated;
+        })
+      );
+    })());
+
+    updateObservables.push((function observeUnpauseNotifications() {
+      return seederInteraction$.pipe(
+        filter(isButtonInteraction),
+        filter(interaction => interaction.customId === messageButtonIds.unpauseNotifications),
+        mergeMap(async function receiveUnpauseNotification(interaction) {
+          const discordId = BigInt(interaction.user.id);
+          const pausedUntil = (await seederStoreDeferred).state.discordId.get(discordId)!.notifications_paused_until;
+          if (!isNonNulled(pausedUntil) || compareAsc(pausedUntil, Date.now()) == -1) {
+            throw new InteractionError('Notifications are already unpaused', interaction);
+          }
+          const updated = await updateSeeder(discordId, { notifications_paused_until: null });
+          interaction.reply({
+            ephemeral: true,
+            content: 'Notifications are now unpaused.'
+          });
+          return updated;
+        })
+      );
+    })());
+    updatedSeeder$ = merge(...updateObservables).pipe(map(toChange('updated')));
+
+    removedSeeder$ = (function observeUnregisterButton() {
+      return seederInteraction$.pipe(
+        filter(isButtonInteraction),
+        filter(interaction => interaction.customId === messageButtonIds.unregister),
+        mergeMap(async (interaction): Promise<Seeder | undefined> => {
+          const discordId = BigInt(interaction.user.id);
+          const removed = await removeSeeder(discordId);
+          interaction.reply('You have been succesfully unregistered.');
+
+          return removed;
+        }),
+        filter(isDefined),
+        map(elt => ({ type: 'removed', elt }))
+      );
+    })();
   })();
 
-  const seeder$ = of(existingSeeder$, newSeeder$, removedSeeder$, updatedSeeder$).pipe(concatAll());
-  _seedersDeferred.resolve(new EntityStore(seeder$, seederIndexes, 'seeders').setPrimaryIndex('discordId'));
 
-  const notifiableSeeder$: Observable<Change<Seeder>> = (function observeNotifiableSeeders() {
-    return seeder$.pipe(mergeMap((seederChange) => {
+  const seeder$ = concat(existingSeeder$, merge(newSeeder$, removedSeeder$, updatedSeeder$));
+  let seederStore = new EntityStore(seeder$, seederIndexes, 'seeders').setPrimaryIndex('discordId');
+  _seedersDeferred.resolve(seederStore);
+
+  const notifiableSeeder$: Observable<Change<bigint>> = (function observeNotifiableSeeders() {
+    return seederStore.trackAllEntities().pipe(mergeMap((seederChange) => {
       switch (seederChange.type) {
         case 'added': {
-          const changesForSeeder$ = seeder$.pipe(
-            filter(s => s.elt.id === seederChange.elt.id),
-            takeWhile(s => s.type !== 'removed')
+          const seeder$ = from(seederStore.trackEntity(seederChange.elt.discord_id, 'discordId', true)).pipe(filter(change => change.type === 'removed'));
+          const notifyWhen$: Observable<NotifyWhen> = seeder$.pipe(map(getElt), map((seeder) => seeder.notify_when), startWith(seederChange.elt.notify_when), distinct());
+          const shouldNotify$ = observeNotifiable(seederChange.elt.discord_id, seederChange.elt.steam_id, notifyWhen$).pipe(
+            endWith(false),
+            // don't emit until notifications are on, so we don't try to remove a non-existant entry from the store
+            skipWhile((shouldNotify) => !shouldNotify),
+            map(shouldNotify => ({
+              elt: seederChange.elt.discord_id,
+              type: shouldNotify ? 'added' : 'removed'
+            } as Change<bigint>))
           );
-          const updated$ = changesForSeeder$.pipe(filter(s => s.type === 'updated'));
-          const notifyWhen$: Observable<NotifyWhen> = updated$.pipe(map(({ elt }) => elt.notify_when), startWith(seederChange.elt.notify_when), distinct());
-          const shouldNotify$ = observeNotifiable(seederChange.elt.discord_id, seederChange.elt.steam_id, notifyWhen$);
-          return shouldNotify$.pipe(map(shouldNotify => ({
-            elt: seederChange.elt,
-            type: shouldNotify ? 'added' : 'removed'
-          } as Change<Seeder>)));
+          return shouldNotify$;
         }
         default: {
           return EMPTY;
@@ -276,7 +374,7 @@ export function setupSeeders() {
       }
     }));
   })();
-  _notifiableSeederStoreDeferred.resolve(new EntityStore(notifiableSeeder$, seederIndexes, 'notifiableSeeders').setPrimaryIndex('discordId'));
+  _notifiableSeederStoreDeferred.resolve(new EntityStore(notifiableSeeder$, getIdentityIndex<bigint>(), 'notifiableSeeders'));
 }
 
 function observeNotifiable(discordId: bigint, steamId: bigint, notifySetting$: Observable<NotifyWhen>): Observable<boolean> {
@@ -314,3 +412,56 @@ function observeNotifiable(discordId: bigint, steamId: bigint, notifySetting$: O
   );
 }
 
+/**
+ * Only let seeder interactions the filter, and respond to interactions from non-seeders appropriately
+ */
+export function filterNonSeederInteractions() {
+  return (observable: Observable<Interaction>): Observable<Interaction> => {
+    return observable.pipe(
+      withLatestFrom(seederStoreDeferred),
+      filter(([interaction, store]) => {
+        let seeder = store.state.discordId.get(BigInt(interaction.user.id));
+        if (!seeder) {
+          if (interaction.isRepliable())
+            interaction.reply({
+              ephemeral: true,
+              content: 'You are not signed up as a Seeder!'
+            });
+          ensurePromptedSignup(interaction.user.id);
+          return false;
+        }
+        return true;
+      }),
+      map(([interaction]) => interaction)
+    );
+  };
+}
+
+/**
+ * Only let seeder reaction through the filter, and respond to reactions from non-seeders appropriately
+ */
+export function filterNonSeederReactions() {
+  return (observabe: Observable<ReactionChange>): Observable<ReactionChange> => {
+    return observabe.pipe(
+      withLatestFrom(seederStoreDeferred),
+      filter(([interaction, store]) => {
+        if (store.state.discordId.has(interaction.elt.userId)) {
+          ensurePromptedSignup(interaction.elt.userId.toString());
+          return false;
+        }
+        return true;
+      }),
+      map(([change]) => change)
+    );
+  };
+}
+
+
+export async function ensurePromptedSignup(discordUserId: string) {
+  const [{ count }] = (await dbPool.query(sql`SELECT COUNT(*)
+                                              FROM users_prompted_for_signup
+                                              WHERE discord_id ? ${discordUserId}`)) as [{ count: bigint }];
+  if (count !== 0n) return;
+  const guildMember = await (await getInstanceGuild()).members.fetch(discordUserId);
+  guildMember.send({ ...(await signUpPromptMessage(guildMember.user)) });
+}

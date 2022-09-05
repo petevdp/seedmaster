@@ -17,7 +17,8 @@ import {
   TextInputBuilder,
   ModalActionRowComponentBuilder,
   APISelectMenuOption,
-  SelectMenuComponentOptionData
+  SelectMenuComponentOptionData,
+  User
 } from 'discord.js';
 import { v4 as uuidv4 } from 'uuid';
 import { discordClientDeferred } from './discordClient';
@@ -25,9 +26,14 @@ import { NotifyWhen } from './models';
 
 export const messageButtonIds = {
   signUp: 'sign-up',
-  unregister: 'unregister'
+  unregister: 'unregister',
+  pauseNotifications: 'pause-notifications',
+  notifyWhen: 'notify-when', unpauseNotifications: 'unpause-notifications'
+
 };
 
+
+const signupMessageLink = Promise.resolve('http://google.com');
 
 export type ContolPanelButtons = {}
 
@@ -46,8 +52,8 @@ export function mainSignupMessage() {
   };
 }
 
-export function signUpPromptMessage(member: GuildMember, signUpMessageLink: string): MessageOptions {
-  const content = `Hello ${userMention(member.id)}! To be notified of when we're seeding, please sign up below:`;
+export async function signUpPromptMessage(member: User): Promise<MessageOptions> {
+  const content = `Hello ${userMention(member.id)}! To be notified of when we're seeding, please sign up below: ${await signupMessageLink}`;
   const signUpButton = new ButtonBuilder()
     .setCustomId(messageButtonIds.signUp)
     .setLabel('Sign Up')
@@ -57,6 +63,16 @@ export function signUpPromptMessage(member: GuildMember, signUpMessageLink: stri
   return {
     content,
     components: [signUpRow]
+  };
+}
+
+function seederReaction() {
+  return 'SEEDER_REACTION_EMOJI';
+}
+
+export function welcomeMessage(): MessageOptions {
+  return {
+    content: `Thanks for signing up! make your way to ${getSeedChannel()} and react with ${seederReaction()} to be notified when seeding will start`
   };
 }
 
@@ -102,12 +118,24 @@ export function controlPanelMessage(): MessageOptions {
       } as SelectMenuComponentOptionData
     );
 
+  const pauseNotificationsButton = new ButtonBuilder()
+    .setCustomId(messageButtonIds.pauseNotifications)
+    .setLabel('Pause Notifications')
+    .setStyle(ButtonStyle.Secondary);
+
+  const unpauseNotificationsButton = new ButtonBuilder()
+    .setCustomId(messageButtonIds.unpauseNotifications)
+    .setStyle(ButtonStyle.Secondary)
+    .setLabel('Unpause notifications');
+
   const unregisterRow = new ActionRowBuilder<ButtonBuilder>().addComponents(unregisterButton);
   const notifyWhenRow = new ActionRowBuilder<SelectMenuBuilder>().addComponents(notifyWhenSelect);
+  const generalButtonRow = new ActionRowBuilder<ButtonBuilder>().addComponents(pauseNotificationsButton, unpauseNotificationsButton);
 
   return {
-    content: `Manage or unregister yourself from ${getMe()} here: `
-  }
+    content: `Manage or unregister yourself from ${getMe()} here: `,
+    components: [unregisterRow, notifyWhenRow, generalButtonRow]
+  };
 }
 
 
@@ -176,12 +204,13 @@ export function editServerSeedMessagePlayerCount(msg: Message, playerCount: numb
 
 export const signupModalIds = {
   steamId: 'steam-id',
-  notifyWhen: 'notify-when'
+  notifyWhen: 'notify-when',
+  startOfModalId: 'sign-up-modal'
 };
 
 export function signUpModal(): [ModalBuilder, string] {
   const modalBuilder = new ModalBuilder();
-  const modalId = 'sign-up-modal-' + uuidv4();
+  const modalId = `${signupModalIds.startOfModalId}-${uuidv4()}`
   modalBuilder
     .setTitle('Sign Up')
     .setCustomId(modalId);
@@ -201,7 +230,38 @@ export function signUpModal(): [ModalBuilder, string] {
   return [modalBuilder, modalId];
 }
 
-function getMe() {
-    return "HOW TO GET BOT DETAILS HERe"
+export const pauseNotificationsModalIds = {
+  time: 'time',
+  modalIdStart: 'pause-notifications-modal'
+};
+
+export function pauseNotificationsModal() {
+  const modalBuilder = new ModalBuilder();
+  const modalId = pauseNotificationsModalIds.modalIdStart + uuidv4();
+  modalBuilder
+    .setTitle('Pause Notifications')
+    .setCustomId(modalId);
+
+
+  const timeTextInput = new TextInputBuilder()
+    .setCustomId(pauseNotificationsModalIds.time)
+    .setLabel('Time')
+    .setRequired(true)
+    .setStyle(TextInputStyle.Short);
+
+
+  modalBuilder.addComponents([
+    new ActionRowBuilder<ModalActionRowComponentBuilder>().addComponents(timeTextInput)
+  ]);
+
+  return modalBuilder;
 }
 
+function getMe() {
+  return 'HOW TO GET BOT DETAILS HERe';
+}
+
+
+function getSeedChannel() {
+  return 'SEEDING CHANNEL';
+}

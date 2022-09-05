@@ -1,10 +1,12 @@
-import { concat, from, Observable } from 'rxjs';
+import secondsToMilliseconds from 'date-fns/secondsToMilliseconds';
+import { concat, from, interval, Observable } from 'rxjs';
 import {
   share,
   mergeAll,
   map
 } from 'rxjs/operators';
 import { createObserverTarget } from '../cleanup';
+import { environment } from '../globalServices/environment';
 import {
   accumulateMap,
   auditChanges,
@@ -12,7 +14,14 @@ import {
   isDeferred, mapChange,
   toChange
 } from './asyncUtils';
-import { filter, first, mapTo, startWith, withLatestFrom } from './rxOperators';
+import {
+  filter,
+  first,
+  mapTo,
+  startWith,
+  takeWhile,
+  withLatestFrom
+} from './rxOperators';
 
 export type GetKey<K, T> = (elt: T) => K;
 export type IndexCollection<L extends string, K, T> = Record<L, GetKey<K, T>>
@@ -34,27 +43,36 @@ export type PossiblyDeferred<T> = T | Promise<T>;
 // export function createEntityStore<L extends string, K, T>(change$: Observable<Change<T>>, indexes: IndexCollection<L, K, T>, storeLabel: string) {
 //   return new EntityStore(change$, indexes, storeLabel);
 // }
+//
+// export function processAllEntities<T>(store: PossiblyDeferred<EntityStore<string, unknown, T>>): Observable<Change<T>> {
+//   if (isDeferred(store)) {
+//     return flattenDeferred(store.then(store => {
+//       const out = processAllEntities(store);
+//       return out;
+//     }));
+//   }
+//
+//   // wrap accessing store.state in cold observable so the caller gets up-to-date values on subscription
+//   // const existing$ = new Observable<T>((s) => {
+//   //   const existing = [...Object.values(store.state)[0].values()];
+//   //   for (let elt of existing) {
+//   //     s.next(elt);
+//   //   }
+//   // }).pipe(map(toChange('added')));
+//   const existing = [...Object.values(store.state)[0].values()] as T[];
+//   return concat(
+//     from(existing).pipe(map(toChange('added'))),
+//     store.change$
+//   );
+// }
 
-export function processAllEntities<T>(store: PossiblyDeferred<EntityStore<string, unknown, T>>): Observable<Change<T>> {
-  if (isDeferred(store)) {
-    return flattenDeferred(store.then(store => {
-      const out = processAllEntities(store);
-      return out;
-    }));
-  }
 
-  // wrap accessing store.state in cold observable so the caller gets up-to-date values on subscription
-  // const existing$ = new Observable<T>((s) => {
-  //   const existing = [...Object.values(store.state)[0].values()];
-  //   for (let elt of existing) {
-  //     s.next(elt);
-  //   }
-  // }).pipe(map(toChange('added')));
-  const existing = [...Object.values(store.state)[0].values()] as T[];
-  return concat(
-    from(existing).pipe(map(toChange('added'))),
-    store.change$
-  );
+// this is all here so we can set a breakpoint to look at all the stores when we want to
+const DEBUG_stores: Record<string,EntityStore<any, any, any>> = {}
+if (environment.NODE_ENV === 'development') {
+  interval(secondsToMilliseconds(2)).subscribe(() => {
+    DEBUG_stores
+  })
 }
 
 
@@ -78,6 +96,9 @@ export class EntityStore<L extends string, K, T> {
       state[keyLabel as L] = map;
     }
     this.state = state as typeof this.state;
+    if (environment.NODE_ENV === 'development') {
+      DEBUG_stores[storeLabel] = this;
+    }
   }
 
   trackAllEntities(): Observable<Change<T>> {
@@ -89,7 +110,7 @@ export class EntityStore<L extends string, K, T> {
   }
 
   setPrimaryIndex(label: L): EntityStore<L, K, T> {
-    this.primaryIndex = label
+    this.primaryIndex = label;
     return this;
   }
 
@@ -101,9 +122,9 @@ export class EntityStore<L extends string, K, T> {
     return this.trackAllEntities().pipe(map(() => this.entries));
   }
 
-  trackEntity(key: K, label: L = this.primaryIndex): Observable<Change<T>> {
+  trackEntity(key: K, label: L = this.primaryIndex, completeWhenRemoved = true): Observable<Change<T>> {
     const getKey = this.indexes[label];
-    let change$ = this.change$.pipe(filter((change) => getKey(change.elt) === key));
+    let change$ = this.change$.pipe(filter((change) => getKey(change.elt) === key), takeWhile(c => c.type !== 'removed', true));
     const existing$ = new Observable<T>((sub) => {
       const existing = this.state[label].get(key);
       if (existing) sub.next(existing);
@@ -117,6 +138,14 @@ export class EntityStore<L extends string, K, T> {
   }
 
   trackEntityEvent(key: K, eventType: Change<T>['type'], label: L = this.primaryIndex): Promise<T | undefined> {
-    return this.trackEntity(key, label).pipe(changeOfType(eventType), first()).toPromise();
+    return this.trackEntity(key, label).pipe(changeOfType(eventType)).toPromise();
   }
+}
+
+export type IdentityIndex<T> = IndexCollection<'identity', T, T>;
+
+export function getIdentityIndex<T>(): IndexCollection<'identity', T, T> {
+  return {
+    identity: (elt: T) => elt
+  };
 }

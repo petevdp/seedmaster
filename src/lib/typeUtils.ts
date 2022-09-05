@@ -18,6 +18,10 @@ export function isNonNulled<T>(value: T): value is NonNullable<T> {
   return value != null;
 }
 
+export function isDefined<T>(val: T | undefined | null): val is T {
+  return val !== undefined && val !== null;
+}
+
 
 type Falsy = false | 0 | '' | null | undefined;
 

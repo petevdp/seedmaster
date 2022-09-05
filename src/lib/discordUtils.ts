@@ -1,9 +1,13 @@
 import discord, {
+  ButtonInteraction,
   Interaction,
   Message,
+  MessageOptions,
   MessageReaction,
+  ModalSubmitInteraction,
   PartialMessageReaction,
   PartialUser,
+  SelectMenuInteraction,
   User
 } from 'discord.js';
 import { from, Observable, of, fromEvent } from 'rxjs';
@@ -20,6 +24,7 @@ import { registerInputObservable } from '../cleanup';
 import { discordClientDeferred } from '../discordClient';
 import { logger, ppObj } from '../globalServices/logger';
 import { flattenDeferred, Change } from './asyncUtils';
+import { catchError } from './rxOperators';
 import { isNonNulled } from './typeUtils';
 
 
@@ -29,7 +34,7 @@ export function getInteractionObservable(client: discord.Client): Observable<Int
   if (interaction$) return interaction$;
   interaction$ = (fromEvent(client, 'interactionCreate') as Observable<Interaction>).pipe(
     registerInputObservable({ context: 'getReactionObservable' }),
-    tap((change) => logger.debug(`received discord interaction: ${ppObj(change)}`, change)),
+    // tap((change) => logger.debug(`received discord interaction: ${ppObj(change)}`, change)),
     share()
   );
   return interaction$;
@@ -59,7 +64,7 @@ export function getReactionObservable(client: discord.Client): Observable<Reacti
     .pipe(
       mergeAll(),
       registerInputObservable({ context: 'getReactionObservable' }),
-      tap((change) => logger.debug(`received discord reaction change: ${ppObj(change)}`, change)),
+      // tap((change) => logger.debug(`received discord reaction change: ${ppObj(change)}`, change)),
       share()
     );
   return reaction$;
@@ -105,6 +110,20 @@ export function getPresenceObservable(): Observable<discord.Presence> {
   );
 }
 
+export function isButtonInteraction(interaction: Interaction): interaction is ButtonInteraction {
+  return interaction.isButton();
+}
+
+
+export function isModalSubmissionInteraction(interaction: Interaction): interaction is ModalSubmitInteraction {
+  return interaction.isModalSubmit();
+}
+
+export function isSelectObservable(interaction: Interaction): interaction is SelectMenuInteraction {
+  return interaction.isSelectMenu();
+}
+
+
 // a specific thrown error that occurs during a discord interaction that we want to notify the user about
 export class InteractionError extends Error {
   constructor(msg: string, rawInteraction: discord.Interaction) {
@@ -119,3 +138,14 @@ export class InteractionError extends Error {
 }
 
 
+// TODO: generalize this
+export function catchInteractionError<T>() {
+  return (observable: Observable<T>): Observable<T> => {
+    return observable.pipe(
+      catchError((err, o) => {
+        if (err instanceof InteractionError) return o;
+        throw err;
+      })
+    );
+  };
+}

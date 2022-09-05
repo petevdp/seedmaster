@@ -130,6 +130,13 @@
         "typeName": "INTEGER"
       },
       {
+        "name": "notifications_paused_until",
+        "isNullable": true,
+        "hasDefault": false,
+        "typeId": 1114,
+        "typeName": "TIMESTAMP"
+      },
+      {
         "name": "notify_when",
         "isNullable": false,
         "hasDefault": true,
