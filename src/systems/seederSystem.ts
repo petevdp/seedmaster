@@ -33,11 +33,11 @@ import {
   startWith,
   tap
 } from 'rxjs/operators';
-import { Seeder } from './__generated__';
-import { createObserverTarget } from './cleanup';
-import { config } from './config';
-import { dbPool, schema } from './db';
-import { discordClientDeferred } from './discordClient';
+import { Seeder } from '../__generated__';
+import { createObserverTarget } from '../cleanup';
+import { config } from 'config';
+import { dbPool, schema } from 'services/db';
+import { discordClientDeferred } from './discordClientSystem';
 import {
   controlPanelMessage,
   mainSignupMessage,
@@ -45,10 +45,17 @@ import {
   signUpModal,
   signupModalIds, signUpPromptMessage,
   welcomeMessage
-} from './discordComponents';
-import { logger, MetadataError, steamClient } from './globalServices/logger';
-import { getInstanceGuild, instanceTenantDeferred } from './instanceTenant';
-import { Change, flattenDeferred, getElt, toChange } from './lib/asyncUtils';
+} from 'views/discordComponents';
+import {
+  baseLogger,
+  MetadataError,
+  steamClient
+} from 'services/baseLogger';
+import {
+  getInstanceGuild,
+  instanceTenantDeferred
+} from './instanceTenantSystem';
+import { Change, flattenDeferred, getElt, toChange } from 'lib/asyncUtils';
 import {
   catchInteractionError,
   getInteractionObservable,
@@ -57,16 +64,16 @@ import {
   isButtonInteraction,
   isModalSubmissionInteraction,
   isSelectObservable, ReactionChange
-} from './lib/discordUtils';
+} from 'lib/discordUtils';
 import {
   EntityStore,
   getIdentityIndex, IdentityIndex,
   IndexCollection
-} from './lib/entityStore';
-import { Future } from './lib/future';
-import { endWith, skipWhile, withLatestFrom } from './lib/rxOperators';
-import { enumRepr, isDefined, isNonNulled } from './lib/typeUtils';
-import { NotifyWhen } from './models';
+} from 'lib/entityStore';
+import { Future } from 'lib/future';
+import { endWith, skipWhile, withLatestFrom } from 'lib/rxOperators';
+import { enumRepr, isDefined, isNonNulled } from 'lib/typeUtils';
+import { NotifyWhen } from '../models';
 import compareAsc from 'date-fns/compareAsc';
 
 type indexLabels = 'discordId' | 'steamId'
@@ -138,14 +145,14 @@ export function setupSeeders() {
     type: 'added',
     elt: s
   })));
-  const interaction$ = flattenDeferred(discordClientDeferred.then(c => getInteractionObservable(c)))
+  const interaction$ = flattenDeferred(discordClientDeferred.then(c => getInteractionObservable(c)));
   let seederInteraction$ = interaction$.pipe(
     filterNonSeederInteractions()
   );
 
 
   (function observeSignUpButtons() {
-    const contextLogger = logger.child({ context: 'observeSignUpButton' });
+    const contextLogger = baseLogger.child({ context: 'observeSignUpButton' });
     createObserverTarget(
       interaction$.pipe(
         filter(isButtonInteraction),
@@ -176,7 +183,7 @@ export function setupSeeders() {
 
 
   const newSeeder$: Observable<Change<Seeder>> = (function observeSignUpModalSubmission() {
-    const contextLogger = logger.child({ context: 'observeSignUpModalSubmission' });
+    const contextLogger = baseLogger.child({ context: 'observeSignUpModalSubmission' });
     const o = seederInteraction$.pipe(
       filter(isModalSubmissionInteraction),
       filter(interaction => interaction.customId.startsWith(signupModalIds.startOfModalId)),
@@ -378,17 +385,17 @@ export function setupSeeders() {
 }
 
 function observeNotifiable(discordId: bigint, steamId: bigint, notifySetting$: Observable<NotifyWhen>): Observable<boolean> {
-  const presenceUpdate$ = getPresenceObservable().pipe(filter(p => p.userId === discordId.toString()));
+  const presenceUpdate$ = flattenDeferred(discordClientDeferred.then(discordClient => getPresenceObservable(discordClient).pipe(filter(p => p.userId === discordId.toString()))));
   const currentPresence$ = getInstanceGuild()
     .then(guild => guild.members.fetch(discordId.toString()))
     .then(member => member.fetch())
     .then(member => member.presence as discord.Presence);
 
   currentPresence$.then(p => {
-    logger.info(p);
+    baseLogger.info(p);
   });
 
-  const presence$ = of(currentPresence$, presenceUpdate$).pipe(mergeAll(), tap(p => logger.info(p)));
+  const presence$ = of(currentPresence$, presenceUpdate$).pipe(mergeAll(), tap(p => baseLogger.info(p)));
   return combineLatest(presence$, notifySetting$).pipe(
     map(([presence, notify]): boolean => {
       switch (notify) {

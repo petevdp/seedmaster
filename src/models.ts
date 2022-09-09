@@ -3,26 +3,7 @@ import { RawPlayer } from './config/Config';
 import { QueryResult } from 'gamedig';
 import { Message } from 'discord.js';
 
-export type SeedAttempt = {
-  readonly attemptId: string;
-  readonly serverId: string;
-  // discordId / response
-  readonly responses: ReadonlyMap<string, SeederResponse>;
-  readonly expectedPlayerCount: number;
-  readonly createdAt: Date;
-  readonly seederCount: number;
-};
-
-export type SeederResponse = {
-  // seeder discord id
-  readonly seederResponseId: string;
-  readonly discordId: string;
-  readonly attending: boolean;
-  readonly createdAt: Date;
-};
-
 export type PlayerWithDetails = Player & Omit<RawPlayer, 'steamID' | 'playerID'>
-
 
 export enum NotifyWhen {
   Online,
@@ -44,6 +25,13 @@ export enum SeedSessionEventType {
   Failure = 1,
   Cancelled = 2,
   Started = 3,
+}
+
+export enum SeedLogEndReason {
+  Success = 0,
+  Failure = 1,
+  Cancelled = 2,
+  Disconnected = 3,
 }
 
 export type SessionStartCommandOptions = {

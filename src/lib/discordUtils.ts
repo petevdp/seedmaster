@@ -2,7 +2,6 @@ import discord, {
   ButtonInteraction,
   Interaction,
   Message,
-  MessageOptions,
   MessageReaction,
   ModalSubmitInteraction,
   PartialMessageReaction,
@@ -17,12 +16,9 @@ import {
   mergeMap,
   share,
   mergeAll,
-  tap,
   filter
 } from 'rxjs/operators';
 import { registerInputObservable } from '../cleanup';
-import { discordClientDeferred } from '../discordClient';
-import { logger, ppObj } from '../globalServices/logger';
 import { flattenDeferred, Change } from './asyncUtils';
 import { catchError } from './rxOperators';
 import { isNonNulled } from './typeUtils';
@@ -100,8 +96,8 @@ export function observeMessageReactions(client: discord.Client, message: Message
 }
 
 
-export function getPresenceObservable(): Observable<discord.Presence> {
-  const presenceUpdate$ = flattenDeferred(discordClientDeferred.then(client => fromEvent(client, 'presenceUpdate') as Observable<[oldPresence: discord.Presence | null, newPresence: discord.Presence]>));
+export function getPresenceObservable(client: discord.Client): Observable<discord.Presence> {
+  const presenceUpdate$ = fromEvent(client, 'presenceUpdate') as Observable<[oldPresence: discord.Presence | null, newPresence: discord.Presence]>;
   return presenceUpdate$.pipe(
     map(([newPresence]) => newPresence || null),
     filter(isNonNulled),
@@ -113,7 +109,6 @@ export function getPresenceObservable(): Observable<discord.Presence> {
 export function isButtonInteraction(interaction: Interaction): interaction is ButtonInteraction {
   return interaction.isButton();
 }
-
 
 export function isModalSubmissionInteraction(interaction: Interaction): interaction is ModalSubmitInteraction {
   return interaction.isModalSubmit();

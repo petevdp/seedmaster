@@ -4,18 +4,24 @@ import {
 import {
   mergeMap
 } from 'rxjs/operators';
-import { discordClientDeferred, logInToDiscord } from './discordClient';
-import { commandNames, registerDiscordCommands } from './discordCommands';
+import {
+  discordClientDeferred,
+  setupDiscordClient
+} from './systems/discordClientSystem';
+import {
+  commandNames,
+  setupDiscordCommands
+} from './systems/discordCommandsSystem';
 import {
   setupInstanceTenant, getInstanceGuild,
   instanceTenantDeferred
-} from './instanceTenant';
+} from './systems/instanceTenantSystem';
 import {
   flattenDeferred
 } from './lib/asyncUtils';
 import { config } from './config';
-import { dbPool } from './db';
-import { schema } from './db';
+import { dbPool } from './services/db';
+import { schema } from './services/db';
 import {
   getChatCommandInteraction
 } from './lib/discordUtils';
@@ -24,17 +30,20 @@ import {
   tryToFlushInputObservables,
   getObserverCountRepr
 } from './cleanup';
-import { logger } from './globalServices/logger';
-import { setupSeeders } from './setupSeeders';
-import { setupServers } from './setupServers';
+import { baseLogger } from './services/baseLogger';
+import { setupSeeders } from './systems/seederSystem';
+import { index } from './systems/serverSystem';
 
 
 export default function main() {
-  logger.info('startup');
+  baseLogger.info('startup');
 
+  // setup all systems
   setupInstanceTenant();
-  logInToDiscord();
-
+  setupDiscordClient();
+  setupSeeders();
+  index();
+  setupDiscordCommands();
 
   (function handleGenericChatCommands() {
     const chatCommandInteraction$ = flattenDeferred(discordClientDeferred.then(c => getChatCommandInteraction(c)));
@@ -49,7 +58,7 @@ export default function main() {
         const channel = (await guild.channels.fetch(config.seeding_channel_id)) as TextChannel;
         const messages = await channel!.messages.fetch();
         await messages.map(async (msg) => {
-          logger.debug(`author: ${msg.author.id} === bot: ${botMember.id}`);
+          baseLogger.debug(`author: ${msg.author.id} === bot: ${botMember.id}`);
           if (msg.author.id === botMember.id) {
             await msg.delete();
             schema.server_managed_message(dbPool).delete({
@@ -67,11 +76,6 @@ export default function main() {
     ), { context: 'resetMessages' });
   })();
 
-
-  setupSeeders();
-  setupServers();
-  registerDiscordCommands();
-
   (function watchForProcessInturrupt() {
     // ensure SIGINT is emitted properly on windows
     var win32 = process.platform === 'win32';
@@ -88,13 +92,13 @@ export default function main() {
     }
 
     process.on('SIGINT', async () => {
-      logger.info('received SIGINT, winding down...');
+      baseLogger.info('received SIGINT, winding down...');
       if (config.debug?.flush_observables === undefined || config.debug.flush_observables) await tryToFlushInputObservables();
-      logger.info('Exiting');
+      baseLogger.info('Exiting');
       process.exit();
     });
   })();
 
-  logger.debug(`Active observers on main end: ${getObserverCountRepr()}`);
+  baseLogger.debug(`Active observers on main end: ${getObserverCountRepr()}`);
 }
 

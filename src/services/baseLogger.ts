@@ -78,7 +78,7 @@ export class MetadataError extends Error {
 }
 
 
-export const logger: LoggerWithMeta<LoggerMetadata> = winston.createLogger({
+export const baseLogger: LoggerWithMeta<LoggerMetadata> = winston.createLogger({
   level: 'debug',
   format: format.combine(
     format.timestamp(),
@@ -135,5 +135,5 @@ if (environment.NODE_ENV !== NodeEnv.PRODUCTION) {
   );
 
 
-  logger.add(new winston.transports.Console({ format: consoleFormat, debugStdout: true }));
+  baseLogger.add(new winston.transports.Console({ format: consoleFormat, debugStdout: true }));
 }

@@ -1,12 +1,12 @@
 import secondsToMilliseconds from 'date-fns/secondsToMilliseconds';
-import { concat, from, interval, Observable } from 'rxjs';
+import { concat, firstValueFrom, from, interval, Observable } from 'rxjs';
 import {
   share,
   mergeAll,
   map
 } from 'rxjs/operators';
 import { createObserverTarget } from '../cleanup';
-import { environment } from '../globalServices/environment';
+import { environment } from 'services/environment';
 import {
   accumulateMap,
   auditChanges,
@@ -15,6 +15,7 @@ import {
   toChange
 } from './asyncUtils';
 import {
+  distinctUntilChanged,
   filter,
   first,
   mapTo,
@@ -138,7 +139,14 @@ export class EntityStore<L extends string, K, T> {
   }
 
   trackEntityEvent(key: K, eventType: Change<T>['type'], label: L = this.primaryIndex): Promise<T | undefined> {
-    return this.trackEntity(key, label).pipe(changeOfType(eventType)).toPromise();
+    return firstValueFrom(this.trackEntity(key, label).pipe(changeOfType(eventType)));
+  }
+  get size() {
+    return this.state[this.primaryIndex].size;
+  }
+
+  trackSize() {
+    return this.change$.pipe(mapTo(this.size),distinctUntilChanged())
   }
 }
 

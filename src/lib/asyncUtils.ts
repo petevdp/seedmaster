@@ -17,7 +17,7 @@ import { isNonNulled } from './typeUtils';
 
 export class AlreadyFulfilledError extends Error {
   constructor() {
-    super('This promise has already been fi');
+    super('This future has already been resolved');
   }
 }
 
@@ -216,7 +216,7 @@ export function toChange<T>(type: Change<T>['type']) {
   });
 }
 
-export function countEntities<T>(getKey: (elt: T) => string) {
+export function countEntities<T,K>(getKey: (elt: T) => K) {
   return (o: Observable<Change<T>>): Observable<number> => {
     return o.pipe(
       auditChanges(getKey),

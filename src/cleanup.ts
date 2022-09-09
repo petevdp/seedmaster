@@ -1,38 +1,27 @@
 import {
-  BehaviorSubject,
   Observable,
   Observer,
-  PartialObserver,
   Subject,
-  Subscription,
-  Unsubscribable
+  Subscription
 } from 'rxjs';
 import {
-  mapTo,
   takeUntil,
   takeWhile,
   startWith,
   map,
   filter,
-  tap,
-  catchError,
-  endWith
+  catchError
 } from 'rxjs/operators';
 import {
-  auditChanges,
-  Change,
-  scanChangesToMap,
-  scanChangesToSet
+  Change
 } from './lib/asyncUtils';
 import { setTimeout } from 'timers/promises';
-import { v4 as uuidv4 } from 'uuid';
 
-import minutesToMilliseconds from 'date-fns/minutesToMilliseconds';
 import {
-  logger as baseLogger,
+  baseLogger as baseLogger,
   LoggerMetadata,
   ppObj
-} from './globalServices/logger';
+} from './services/baseLogger';
 import secondsToMilliseconds from 'date-fns/secondsToMilliseconds';
 import { Future } from './lib/future';
 import { isNonNulled } from './lib/typeUtils';
@@ -74,7 +63,7 @@ observerLabel
 
 
 observerLabel.subscribe(change => {
-  baseLogger.info(`observer change: ${change.type} ${change.elt}`, { change });
+  baseLogger.debug(`observer change: ${change.type} ${change.elt}`, { change });
 });
 
 type ObserverNoError<T> = Omit<Partial<Observer<T>>, 'error'>;
@@ -122,17 +111,17 @@ export function registerInputObservable<T>(metadata: LoggerMetadata) {
     context: metadata.context,
     category: 'inputObservable'
   });
-  inputObservableLogger.info(`registered input observable ${metadata.context}`, metadata);
+  inputObservableLogger.debug(`registered input observable ${metadata.context}`, metadata);
   return (observable: Observable<T>): Observable<T> => {
     const out = observable.pipe(takeUntil(flushInputs));
-    createObserverTarget(out, metadata, { complete: () => inputObservableLogger.info(`Completed input observable ${metadata.context}`) });
+    createObserverTarget(out, metadata, { complete: () => inputObservableLogger.debug(`Completed input observable ${metadata.context}`) });
     return out;
   };
 }
 
 export async function tryToFlushInputObservables(): Promise<boolean> {
   const logger = baseLogger.child({ context: 'tryToFlushInputObservables' });
-  logger.info('attempting to flush streams, winding down...');
+  logger.info('attempting graceful shutdown...');
   flushInputs.resolve();
 
   const leftAfterTimeout = await observerCount$
@@ -148,7 +137,7 @@ export async function tryToFlushInputObservables(): Promise<boolean> {
     return true;
   } else {
     logger.warn(`flush attempt timed out, (${leftAfterTimeout} observables left)`);
-    logger.warn(`Active observers after flush attempt: ${getObserverCountRepr()}`);
+    logger.debug(`Active observers after flush attempt: ${getObserverCountRepr()}`);
     return false;
   }
 }

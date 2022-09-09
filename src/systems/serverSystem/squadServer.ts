@@ -5,14 +5,14 @@ import GameDig from 'gamedig';
 import { asapScheduler, fromEvent, Observable, firstValueFrom } from 'rxjs';
 import { observeOn, share } from 'rxjs/operators';
 import WebSocket from 'ws';
-import { Server } from './__generated__';
-import { registerInputObservable } from './cleanup';
-import { config } from './config';
-import { RawPlayer } from './config/Config';
-import { logger as masterLogger } from './globalServices/logger';
-import { auditChanges, Change, mapChange, TimedChange } from './lib/asyncUtils';
-import { map, takeUntil } from './lib/rxOperators';
-import { ServerDetails, ServerWithDetails } from './models';
+import { Server } from '__generated__';
+import { registerInputObservable } from 'cleanup';
+import { config } from 'config';
+import { RawPlayer } from 'config/Config';
+import { baseLogger as masterLogger } from 'services/baseLogger';
+import { auditChanges, Change, mapChange, TimedChange } from 'lib/asyncUtils';
+import { map, takeUntil } from 'lib/rxOperators';
+import { ServerDetails, ServerWithDetails } from 'models';
 
 
 type SquadJSMessage = TimedChange<RawPlayer>;
@@ -40,7 +40,7 @@ export async function queryGameServer(host: string, query_port: number): Promise
   ));
 }
 
-export function observeSquadServer(server: Server): Observable<TimedChange<RawPlayer>> {
+export function observePlayerChangesFromSquadJS(server: Server): Observable<TimedChange<RawPlayer>> {
   const observeSquadLogger = masterLogger.child({ context: 'observeSquadServer' });
   if (!!config.shim_squadjs) {
     return new Observable<TimedChange<RawPlayer>>((s) => {
@@ -89,16 +89,12 @@ export function observeSquadServer(server: Server): Observable<TimedChange<RawPl
         if (count === NaN) {
           count = 1;
         }
-        let playersToAdd: RawPlayer[] = [];
         for (let i = 0; i < count; i++) {
           const player = playersPool.pop();
           if (!player) {
             res.sendStatus(400).send('ran out of players');
             return;
           }
-          playersToAdd.push(player);
-        }
-        for (let player of playersToAdd) {
           players.set(player.steamID, player);
           // TODO: format dates to match the actual logs
           s.next({
@@ -129,28 +125,18 @@ export function observeSquadServer(server: Server): Observable<TimedChange<RawPl
   }
 
   observeSquadLogger.info('connecting to websocket ', server.squadjs_ws_addr);
+  const ws = new WebSocket(server.squadjs_ws_addr);
+  const closed$ = firstValueFrom(fromEvent(ws, 'close'));
 
-  let playerChange$ = new Observable<TimedChange<RawPlayer>>((subscriber) => {
-    observeSquadLogger.info('connecting to websocket ', server.squadjs_ws_addr);
-    const ws = new WebSocket(server.squadjs_ws_addr);
-    const closed$ = firstValueFrom(fromEvent(ws, 'close'));
-
-    fromEvent(ws, 'open')
-      .pipe(takeUntil(closed$))
-      .subscribe(() => {
-        observeSquadLogger.info('Socket opened with ', server.squadjs_ws_addr);
-      });
-
-    (fromEvent(ws, 'message') as Observable<string>)
-      .pipe(
-        takeUntil(closed$),
-        map(msg => JSON.parse(msg) as SquadJSMessage)
-      )
-      .subscribe(subscriber);
+  firstValueFrom(fromEvent(ws, 'open')).then(() => {
+    observeSquadLogger.info('Socket opened with ', server.squadjs_ws_addr);
   });
 
-  return playerChange$.pipe(
-    auditChanges<RawPlayer, string, TimedChange<RawPlayer>>(elt => elt.steamID),
-    registerInputObservable(observeSquadLogger.defaultMeta)
-  );
+  return (fromEvent(ws, 'message') as Observable<string>)
+    .pipe(
+      takeUntil(closed$),
+      map(msg => JSON.parse(msg) as SquadJSMessage),
+      auditChanges<RawPlayer, string, TimedChange<RawPlayer>>(elt => elt.steamID),
+      registerInputObservable(observeSquadLogger.defaultMeta)
+    );
 }

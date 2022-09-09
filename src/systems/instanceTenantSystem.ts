@@ -1,8 +1,8 @@
-import { Tenant } from './__generated__';
-import { config } from './config';
-import { dbPool, schema } from './db';
-import { discordClientDeferred } from './discordClient';
-import { Future } from './lib/future';
+import { Tenant } from '../__generated__';
+import { config } from 'config';
+import { dbPool, schema } from 'services/db';
+import { discordClientDeferred } from './discordClientSystem';
+import { Future } from 'lib/future';
 
 const _instanceTenantDeferred = new Future<Tenant>();
 export const instanceTenantDeferred = _instanceTenantDeferred as Promise<Tenant>;

@@ -1,7 +1,7 @@
-import { sql } from '@databases/pg';
 import { DiscordAPIError } from '@discordjs/rest';
 import { Mutex } from 'async-mutex';
 import minutesToMilliseconds from 'date-fns/minutesToMilliseconds';
+import secondsToMilliseconds from 'date-fns/secondsToMilliseconds';
 import discord, {
   Message,
   MessageEditOptions,
@@ -10,13 +10,16 @@ import discord, {
 } from 'discord.js';
 import deepEquals from 'lodash/isEqual';
 import {
+  asyncScheduler,
   BehaviorSubject,
   combineLatest,
-  EMPTY,
   concat,
+  EMPTY,
+  firstValueFrom,
   from,
-  interval, merge,
-  asyncScheduler,
+  interval,
+  lastValueFrom,
+  merge,
   Observable,
   of,
   Subject,
@@ -37,79 +40,66 @@ import {
   withLatestFrom
 } from 'rxjs/operators';
 import { setTimeout } from 'timers/promises';
+import { Player, Seeder, SeedSessionLog, Server } from '../../__generated__';
+import { createObserverTarget, registerInputObservable } from '../../cleanup';
+import { config } from 'config';
+import { dbPool, schema } from 'services/db';
+import { discordClientDeferred } from '../discordClientSystem';
+import { commandNames } from '../discordCommandsSystem';
 import {
-  Player,
-  Seeder,
-  SeedSessionLog,
-  Server
-} from './__generated__';
-import {
-  createObserverTarget,
-  registerInputObservable
-} from './cleanup';
-import { config } from './config';
-import { dbPool, schema } from './db';
-import { discordClientDeferred } from './discordClient';
-import { commandNames } from './discordCommands';
-import {
-  editServerSeedMessageMapName,
-  editServerSeedMessagePlayerCount,
   playerJoinedSession,
   seedSessionStart,
-  serverSeedMessage, signUpPromptMessage
-} from './discordComponents';
-import { logger, ppObj } from './globalServices/logger';
-import { getInstanceGuild, instanceTenantDeferred } from './instanceTenant';
+  serverSeedMessage
+} from 'views/discordComponents';
+import { baseLogger, ppObj } from 'services/baseLogger';
+import { getInstanceGuild, instanceTenantDeferred } from '../instanceTenantSystem';
 import {
-  accumulateMap,
   catchErrorsOfClass,
   Change,
-  changeOfType, flattenDeferred, getElt,
+  changeOfType,
+  countEntities,
+  flattenDeferred,
+  getElt,
   mapChange,
-  scanChangesToMap, toChange,
+  scanChangesToMap,
+  toChange,
   trackUnifiedState
-} from './lib/asyncUtils';
+} from 'lib/asyncUtils';
 import {
   getChatCommandInteraction,
   InteractionError,
   observeMessageReactions
-} from './lib/discordUtils';
-import {
-  EntityStore,
-  IndexCollection
-} from './lib/entityStore';
-import { Future } from './lib/future';
-import {
-  observeOn,
-  shareReplay,
-  takeUntil,
-  takeWhile
-} from './lib/rxOperators';
-import { parseTimespan, TimespanParsingError } from './lib/timespan';
-import { enumRepr, isNonNulled } from './lib/typeUtils';
+} from 'lib/discordUtils';
+import { EntityStore, IndexCollection } from 'lib/entityStore';
+import { Future } from 'lib/future';
+import { observeOn, shareReplay, takeUntil } from 'lib/rxOperators';
+import { parseTimespan, TimespanParsingError } from 'lib/timespan';
+import { enumRepr, isNonNulled } from 'lib/typeUtils';
 import {
   MessageWithRole,
   PlayerWithDetails,
+  SeedLogEndReason,
   SeedSessionEndReason,
   SeedSessionEvent,
   SeedSessionEventType,
   ServerMessageRole,
   ServerWithDetails,
   SessionStartCommandOptions
-} from './models';
+} from '../../models';
 import {
-  filterNonSeederInteractions, filterNonSeederReactions,
+  filterNonSeederReactions,
   notifiableSeedersStoreDeferred,
   seederStoreDeferred
-} from './setupSeeders';
-import { observeSquadServer, queryGameServer } from './squadServer';
+} from '../seederSystem';
+import {
+  observePlayerChangesFromSquadJS,
+  queryGameServer
+} from './squadServer';
 
 
 const serverIndexes = {
   id: (server: ServerWithDetails) => server.id
 };
-type ServerIndexKeys = keyof (typeof serverIndexes);
-
 export type ServerEntityStore = EntityStore<'id', number, ServerWithDetails>;
 const _serversDeferred = new Future<ServerEntityStore>();
 export const serverStoreDeferred = _serversDeferred as Promise<ServerEntityStore>;
@@ -118,26 +108,21 @@ const activeSeedSessionIndexes = {
   id: (session: SeedSessionLog) => session.id,
   serverId: (session: SeedSessionLog) => session.server_id
 };
-
 type SeedSessionEntityStore = EntityStore<keyof (typeof activeSeedSessionIndexes), number, SeedSessionLog>;
 const _activeSeedSessionsDeferred = new Future<SeedSessionEntityStore>();
 export const activeSeedSessionsDeferred = _activeSeedSessionsDeferred as Promise<SeedSessionEntityStore>;
 
-// // serverId is bigint so it'll work with MultiIndexing
 export type SignUpReaction = { discordUserId: bigint; serverId: number };
-//
 const signUpIndexes = {
   discordUserId: (r: SignUpReaction) => r.discordUserId,
   serverId: (r: SignUpReaction) => BigInt(r.serverId)
 };
 type SignUpEntityStore = EntityStore<keyof (typeof signUpIndexes), bigint, SignUpReaction>;
-// attempts which d
-
 const _signUpReactions = new Future<SignUpEntityStore>();
 export const signUpReactions = _signUpReactions as Promise<SignUpEntityStore>;
 
 
-export async function setupServers() {
+export async function index() {
   const servers = await (async function initServerState() {
     const instanceTenant = await instanceTenantDeferred;
     const serversInDb = await schema.server(dbPool).select({ tenant_id: instanceTenant.id }).all();
@@ -187,18 +172,6 @@ export async function setupServers() {
   ).setPrimaryIndex('id'));
 
   _signUpReactions.resolve(new EntityStore(mergedSignup$, signUpIndexes, 'signUpReactions').setPrimaryIndex('serverId'));
-
-  // manage completeion of seed sessions
-  createObserverTarget(from(mergedSeedSession$.toPromise().finally(async () => {
-    const hangingSessions = [...(await activeSeedSessionsDeferred).state.id.values()];
-    for (let session of hangingSessions) {
-      await schema.seed_session_log(dbPool).update({ id: session.id }, {
-        end_reason: SeedSessionEndReason.Cancelled,
-        end_time: new Date()
-      });
-      logger.warn(`cancelled remaining active seed session ${session.id} due to unforseen error`, { session });
-    }
-  })), { context: 'ManageCompletionOfSeedSessions' });
 }
 
 
@@ -227,16 +200,16 @@ export function setupServer(server: Server) {
     ).pipe(shareReplay(1));
   })();
   gameServerUpdate$.subscribe((update) => {
-    logger.info('game server update: ', ppObj(update));
+    baseLogger.info('game server update: ', ppObj(update));
   });
 
   function getGameServerDetails() {
     return gameServerUpdate$.pipe(first(), map(getElt)).toPromise() as Promise<ServerWithDetails>;
   }
 
-  const activePlayer$: Observable<Change<PlayerWithDetails>> = (function trackAndPersistActivePlayers() {
+  const activePlayerStore = (function trackAndPersistActivePlayers() {
     const playerMtx = new Mutex();
-    const o = observeSquadServer(server).pipe(
+    const activePlayer$ = observePlayerChangesFromSquadJS(server).pipe(
       concatMap(async (playerChange): Promise<Change<PlayerWithDetails> | null> => {
         const steamId = BigInt(playerChange.elt.steamID);
 
@@ -270,140 +243,24 @@ export function setupServer(server: Server) {
         }
       }),
       filter(isNonNulled),
-      tap(change => logger.info(`${change.type} ${change.elt.name} (${change.elt.steam_id})`, change)),
+      tap(change => baseLogger.info(`${change.type} ${change.elt.name} (${change.elt.steam_id})`, change)),
       share()
     );
-    createObserverTarget(o, { context: 'trackAndPersistActivePlayers' });
-    return o;
-  })();
-  const activePlayers = new Map<bigint, PlayerWithDetails>();
-  createObserverTarget(activePlayer$, { context: 'accumulateActivePlayers' }, { next: accumulateMap(activePlayers, player => player.steam_id) });
-  createObserverTarget(activePlayer$, { context: 'countActivePlayers' }, { next: () => logger.info(`num active players: ${activePlayers.size}`) });
-
-  const {
-    serverMessagesDeferred,
-    sendManagedMessage,
-    removeManagedMessage,
-    editManagedMessage
-  } = (function manageChannelMessages() {
-    const messageMutexesDeferred = new Future<Map<bigint, Mutex>>();
-    const serverMessagesDeferred: Future<Map<bigint, MessageWithRole>> = new Future();
-
-    // TODO: better error handling for when message is deleted externally
-
-    async function sendManagedMessage(options: MessageOptions | string, role: ServerMessageRole) {
-      const channel = await deferredChannel;
-      const msg = await channel.send(options);
-      let messageId = BigInt(msg.id);
-      await schema.server_managed_message(dbPool).insert({
-        server_id: server.id,
-        channel_id: BigInt(channel.id),
-        message_id: messageId,
-        role: role
-      });
-      (await messageMutexesDeferred).set(messageId, new Mutex());
-      let messageWithRole = { msg, role };
-      (await serverMessagesDeferred).set(messageId, messageWithRole);
-      return msg;
-    }
-
-    async function editManagedMessage(messageId: bigint, options: MessageEditOptions) {
-      const mutex = (await messageMutexesDeferred).get(messageId);
-      if (!mutex) {
-        throw new Error('trying to edit message that is not tracked or does not exist');
-      }
-      await mutex.acquire();
-      try {
-        const channel = await deferredChannel;
-        const msg = await channel.messages.fetch(messageId.toString());
-        await msg.edit(options);
-        let role = (await serverMessagesDeferred).get(messageId)!.role;
-        (await serverMessagesDeferred).set(messageId, { role, msg });
-        return msg;
-      } finally {
-        mutex.release();
-      }
-    }
-
-    async function removeManagedMessage(messageId: bigint) {
-      const mutex = (await messageMutexesDeferred).get(messageId);
-      if (!mutex) {
-        throw new Error('trying to delete message that is not tracked');
-      }
-      const channel = await deferredChannel;
-      await mutex.acquire();
-      try {
-        const msg = await channel.messages.fetch(messageId.toString());
-        await msg.delete();
-        await schema.server_managed_message(dbPool).delete({
-          server_id: server.id,
-          channel_id: BigInt(channel.id),
-          message_id: messageId
-        });
-        (await messageMutexesDeferred).delete(messageId);
-        (await serverMessagesDeferred).delete(messageId);
-        return msg;
-      } finally {
-        mutex.release();
-      }
-    }
-
-    (async function loadMessagesFromDatabase() {
-      let channelId = BigInt((await deferredChannel).id);
-      const rows = await schema.server_managed_message(dbPool).select({
-        server_id: server.id,
-        channel_id: channelId
-      }).all();
-
-      const channel = await deferredChannel;
-      const messages = (await Promise.all(rows.map(async (row): Promise<MessageWithRole | null> => {
-        try {
-          let msg = await channel.messages.fetch(row.message_id.toString());
-          return ({
-            msg: msg,
-            role: row.role
-          });
-        } catch (err) {
-          if (err instanceof DiscordAPIError && err.code === 10008) {
-            await schema.server_managed_message(dbPool).delete(row);
-            return null;
-          }
-          throw err;
-        }
-      }))).filter(isNonNulled);
-      const msgMap = new Map(messages.map(elt => [BigInt(elt.msg.id), elt]));
-      const msgMtx = new Map(messages.map(elt => [BigInt(elt.msg.id), new Mutex()]));
-      messageMutexesDeferred.resolve(msgMtx);
-      serverMessagesDeferred.resolve(msgMap);
-    })();
-
-    const serverMessages = serverMessagesDeferred as Promise<ReadonlyMap<bigint, MessageWithRole>>;
-    return {
-      sendManagedMessage,
-      editManagedMessage,
-      removeManagedMessage,
-      serverMessagesDeferred: serverMessages
-    };
+    createObserverTarget(activePlayer$, { context: 'trackAndPersistActivePlayers' });
+    const activePlayerStore = new EntityStore(
+      activePlayer$,
+      { steam_id: elt => elt.steam_id },
+      'activePlayerStore'
+    ).setPrimaryIndex('steam_id');
+    return activePlayerStore;
   })();
 
-  const mainServerMessageDeferred = (async function ensureMainServerMessageExists() {
-    const ids = { signUpButton: 'signUp' };
-    const channel = await deferredChannel;
-    let msgWithRole = [...(await serverMessagesDeferred).values()].find((elt) => elt.role === ServerMessageRole.Main) || null;
+  createObserverTarget(activePlayerStore.trackSize(), { context: 'countActivePlayers' }, { next: count => baseLogger.info(`num active players: ${count}`) });
 
-    const gameServerState = await gameServerUpdate$.pipe(first(), map(getElt)).toPromise();
-    const builtMessage = serverSeedMessage(gameServerState!.name, activePlayers.size);
-    let msg = msgWithRole?.msg;
-    if (msg) {
-      msg = await editManagedMessage(BigInt(msg.id), builtMessage as MessageEditOptions);
-    } else {
-      msg = await sendManagedMessage(builtMessage, ServerMessageRole.Main);
-    }
-    return msg;
-  })();
+  const messageManagerDeferred = (async () => new ServerMessageManager(server, await deferredChannel).setup())();
 
   const messageReaction$ = flattenDeferred(
-    Promise.all([discordClientDeferred, mainServerMessageDeferred])
+    Promise.all([discordClientDeferred, messageManagerDeferred.then(m => m.mainServerMessageDeferred)])
       .then(([client, msg]) => observeMessageReactions(client, msg))
   );
 
@@ -422,7 +279,8 @@ export function setupServer(server: Server) {
 
   // manage and record seeding sessions
   let seedSession$: Observable<Change<SeedSessionLog>>;
-  (function setupSeeding() {
+  let notifiableServerSeeder$: Observable<Change<Seeder>>;
+  (function manageSeedSessions() {
     const serverSeeder$ = seedSignUpChange$.pipe(
       changeOfType('added'),
       mergeMap(async (reactionAdded) => {
@@ -450,11 +308,11 @@ export function setupServer(server: Server) {
     );
 
 
-    const notifiableServerSeeder$: Observable<Change<Seeder>> = (function observeNotifiableServerSeeders() {
+    notifiableServerSeeder$ = (function observeNotifiableServerSeeders() {
       return from([
         serverSeeder$,
         flattenDeferred(notifiableSeedersStoreDeferred.then(s => s.trackAllEntities())),
-        activePlayer$
+        activePlayerStore.change$
       ] as Observable<Change<Seeder>>[]).pipe(
         map(mapChange(elt => elt.steam_id)),
         // ensure
@@ -520,7 +378,7 @@ export function setupServer(server: Server) {
               content: 'Starting new session',
               ephemeral: true
             });
-            logger.info('starting new session: ', options);
+            baseLogger.info('starting new session: ', options);
             return options as SessionStartCommandOptions;
           }),
           filter(isNonNulled),
@@ -544,7 +402,7 @@ export function setupServer(server: Server) {
       const activeSessionMtx = new Mutex();
 
       const generatedSeedSessionEvent$: Observable<SeedSessionEvent> = combineLatest([
-        activePlayer$.pipe(scanChangesToMap(elt => elt.steam_id)),
+        activePlayerStore.change$.pipe(scanChangesToMap(elt => elt.steam_id)),
         possiblyAttendingSeeder$.pipe(scanChangesToMap(elt => elt.steam_id)),
         inGracePeriod$,
         activeSessionId$
@@ -559,7 +417,7 @@ export function setupServer(server: Server) {
       );
 
 
-      const seedSessionEvent$: Observable<SeedSessionEvent> = of(
+      let seedSessionEvent$: Observable<SeedSessionEvent> = of(
         generatedSeedSessionEvent$,
         invokedStartSession$.pipe(map(options => ({
           type: SeedSessionEventType.Started,
@@ -570,10 +428,23 @@ export function setupServer(server: Server) {
         // filter out failure events when options.failureImpossible is set
         filter((event) => !(event.type === SeedSessionEventType.Failure && activeSessionOptions?.failureImpossible)),
         tap((event) => {
-          logger.info(`posted new session event: ${ppObj({ type: enumRepr(SeedSessionEventType, event.type) })}`, event);
+          baseLogger.info(`posted new session event: ${ppObj({ type: enumRepr(SeedSessionEventType, event.type) })}`, event);
         }),
         share()
       );
+
+      seedSessionEvent$ = concat(
+        seedSessionEvent$,
+        // if we run out of events to send and there's still an active session, then send a cancellation event
+        lastValueFrom(seedSessionEvent$).then(() => {
+          if (activeSeedSessionSubject.value) {
+            baseLogger.info('seedSessionEvent completed, cancelling active session');
+            return { type: SeedSessionEventType.Cancelled } as SeedSessionEvent;
+          } else {
+            return null;
+          }
+        })
+      ).pipe(filter(isNonNulled));
 
 
       const persistedChange$ = seedSessionEvent$.pipe(
@@ -645,7 +516,7 @@ export function setupServer(server: Server) {
           }
           return change;
         }),
-        tap(change => logger.info(ppObj(change))),
+        tap(change => baseLogger.info(ppObj(change))),
         share()
       );
       createObserverTarget(persistedChange$, { context: 'persistedSeedSessionChange' });
@@ -658,56 +529,30 @@ export function setupServer(server: Server) {
       seedSession$ = persistedChange$;
     })();
 
-
-    (function updateDisplayedServerDetails() {
-      const msgMutex: Mutex = new Mutex();
-
-      (function updateDisplayedMapName() {
-        createObserverTarget(gameServerUpdate$.pipe(changeOfType('updated')), { context: 'updateDisplayedMapName' }, {
-          next: (gameServer) =>
-            msgMutex.runExclusive(async () => {
-              const msg = await mainServerMessageDeferred;
-              const options = editServerSeedMessageMapName(msg, gameServer.map);
-              options && editManagedMessage(BigInt(msg.id), options);
-            })
-        });
-      })();
-
-      (function updateDisplayedPlayerCount() {
-        createObserverTarget(activePlayer$, { context: 'updateDisplayedPlayerCount' }, {
-          next: () =>
-            msgMutex.runExclusive(async () => {
-              const msg = await mainServerMessageDeferred;
-              await editManagedMessage(BigInt(msg.id), editServerSeedMessagePlayerCount(msg, activePlayers.size));
-            })
-        });
-      })();
-    })();
-
-
     (function manageSeedSessionMessages() {
       const sessionLifecycleMessageSaga$ = seedSession$.pipe(
         changeOfType('added'),
         mergeMap(async function manageMessagesForSession(startedSession) {
           const onEnded = seedSession$.pipe(changeOfType('removed'), filter(log => log.id === startedSession.id), first()).toPromise();
           const generatedMessages = new Set<bigint>();
+          const messageManager = await messageManagerDeferred;
 
           await (async function sendStartSessionMessage() {
             const serverDetails = await getGameServerDetails();
-            let options = seedSessionStart(serverDetails.name, activePlayers.size, server.seed_success_player_count, startedSession.start_time);
-            const msg = await sendManagedMessage(options, ServerMessageRole.SessionStart);
+            let options = seedSessionStart(serverDetails.name, activePlayerStore.state.steam_id.size, server.seed_success_player_count, startedSession.start_time);
+            const msg = await messageManager.sendMessage(options, ServerMessageRole.SessionStart);
             generatedMessages.add(BigInt(msg.id));
           })();
 
 
           await (function sendPlayerJoinedMessagesUntilSessionEnded() {
-            return activePlayer$.pipe(
+            return activePlayerStore.change$.pipe(
               changeOfType('added'),
               takeUntil(onEnded),
               mergeMap(async (player) => {
-                const playersLeft = server.seed_success_player_count - activePlayers.size;
+                const playersLeft = server.seed_success_player_count - activePlayerStore.state.steam_id.size;
                 let msgOptions = playerJoinedSession(player.name, playersLeft);
-                const msg = await sendManagedMessage(msgOptions, ServerMessageRole.PlayerJoined);
+                const msg = await messageManager.sendMessage(msgOptions, ServerMessageRole.PlayerJoined);
                 generatedMessages.add(BigInt(msg.id));
               })
             ).toPromise();
@@ -719,15 +564,15 @@ export function setupServer(server: Server) {
             let msg: Message;
             switch (removedSession!.end_reason as number) {
               case SeedSessionEndReason.Failure: {
-                msg = await sendManagedMessage(`Seeding ${serverName} failed. Better luck next time!`, ServerMessageRole.SessionEnded);
+                msg = await messageManager.sendMessage(`Seeding ${serverName} failed. Better luck next time!`, ServerMessageRole.SessionEnded);
                 break;
               }
               case SeedSessionEndReason.Cancelled: {
-                msg = await sendManagedMessage(`Seeding ${serverName} was cancelled.`, ServerMessageRole.SessionEnded);
+                msg = await messageManager.sendMessage(`Seeding ${serverName} was cancelled.`, ServerMessageRole.SessionEnded);
                 break;
               }
               case SeedSessionEndReason.Success: {
-                msg = await sendManagedMessage(`Seeding ${serverName} Succeeded! Yay!`, ServerMessageRole.SessionEnded);
+                msg = await messageManager.sendMessage(`Seeding ${serverName} Succeeded! Yay!`, ServerMessageRole.SessionEnded);
                 break;
               }
               default: {
@@ -741,7 +586,7 @@ export function setupServer(server: Server) {
             if (config.debug?.delete_stale_messages === false) return;
             await setTimeout(minutesToMilliseconds(1));
             await Promise.all([...generatedMessages.values()].map(async id => {
-              await removeManagedMessage(id);
+              await messageManager.removeManagedMessage(id);
             }));
           })();
         })
@@ -770,12 +615,48 @@ export function setupServer(server: Server) {
     })();
     createObserverTarget(notifiedSeeder$, { context: 'notifiedSeeder' });
 
+    (function logActivePlayersInSeedSession() {
+      const logger = baseLogger.child({ context: 'logActivePlayersInSeedSession' });
+
+      createObserverTarget(
+        seedSession$.pipe(
+          changeOfType('added'),
+          mergeMap((session) => {
+            const sessionEnded$ = firstValueFrom(seedSession$.pipe(filter(change => change.elt.id === session.id), changeOfType('removed')));
+            return activePlayerStore.trackAllEntities()
+              .pipe(
+                takeUntil(sessionEnded$),
+                changeOfType('added'),
+                mergeMap(async (addedPlayer) => {
+                  const addedLog = await schema.seed_log(dbPool).insert({
+                    player_id: addedPlayer.steam_id,
+                    start_time: new Date(),
+                    seed_session_log_id: session.id
+                  });
+                  logger.info(`added seed log for player ${addedPlayer.steam_id}: `, { addedLog });
+                  baseLogger.info('Opened seed log', { context: '' });
+                  const endReason = await Promise.race([
+                    activePlayerStore.trackEntityEvent(addedPlayer.steam_id, 'removed').then(() => SeedLogEndReason.Disconnected),
+                    sessionEnded$.then(log => log.end_reason as SeedLogEndReason) // assert as SeedLogEndReason since the enums match up
+                  ]);
+                  const [updatedLog] = await schema.seed_log(dbPool).update({ player_id: addedPlayer.steam_id }, {
+                    end_time: new Date(),
+                    end_reason: endReason
+                  });
+                  logger.info(`finished seed log for player ${addedPlayer.steam_id}:  ${enumRepr(SeedLogEndReason, endReason)}) `, { updatedLog });
+                })
+              );
+          })
+        ),
+        { context: 'logActivePlayersInSeedSession' }
+      );
+    })();
 
     (function trackNonResponsiveSeeders() {
       const nonResponsive$ = notifiedSeeder$.pipe(
         mergeMap((seeder) => {
           // wait for the seeder to join the server for a set amount of time
-          const joined$ = activePlayer$.pipe(changeOfType('added'), filter(change => change.steam_id === seeder.steam_id), first());
+          const joined$ = activePlayerStore.trackAllEntities().pipe(changeOfType('added'), filter(change => change.steam_id === seeder.steam_id), first());
           const timedOut$ = timer(server.seeder_max_response_time).pipe(registerInputObservable({ context: 'waitForSeederTimeOut' }));
 
           // race joined$ and timedOut$
@@ -787,7 +668,47 @@ export function setupServer(server: Server) {
     })();
   })();
 
+  (async function manageMainServerMessage() {
+    const updateCadence$ = interval(secondsToMilliseconds(5)).pipe(
+      startWith(0),
+      registerInputObservable({ context: 'serverMessageUpdateCadenceInterval' })
+    );
+    const serverDetails$ = gameServerUpdate$.pipe(
+      filter(change => ['updated', 'added'].includes(change.type)),
+      map(getElt)
+    );
+    const notifiableServerSeederCount$ = notifiableServerSeeder$.pipe(countEntities(elt => elt.discord_id));
+    const messageManager = await messageManagerDeferred;
 
+    const messageUpdate$ = updateCadence$.pipe(
+      withLatestFrom(
+        serverDetails$,
+        notifiableServerSeederCount$
+      ),
+      map(([_, serverDetails, seederCount]) => {
+        return [
+          serverDetails.name,
+          serverDetails.map,
+          activePlayerStore.size,
+          seederCount,
+          serverDetails.player_threshold_coefficient,
+          serverDetails.seeder_threshold_coefficient,
+          serverDetails.seed_start_threshold
+        ];
+      }),
+
+      // perform a react style "rerendering" of main message if the arguments to serverSeedMessage have changed
+      distinctUntilChanged(deepEquals),
+      mergeMap(async (props): Promise<Message> => {
+        const options = serverSeedMessage(...(props as Parameters<typeof serverSeedMessage>));
+        return messageManager.upsertMainMessage(options);
+      }),
+
+      share()
+    );
+
+    createObserverTarget(messageUpdate$, { context: 'messageUpdates' });
+  })();
   return {
     gameServerChange$: gameServerUpdate$,
     serverSeedSignupChange$: seedSignUpChange$,
@@ -824,7 +745,7 @@ function checkForAutomaticSessionChange(server: Server, playersInServer: Map<big
     failedThresholdDiff: server.seed_failed_threshold - adjustedCounts,
     successDiff: server.seed_success_player_count - uniquePlayers.size
   });
-  logger.info(`Tested for automatic session change: ${ppObj(data)}`);
+  baseLogger.debug(`Tested for automatic session change: ${ppObj(data)}`);
 
 
   if (inActiveSession && inFailedThreshold) return { type: SeedSessionEventType.Failure };
@@ -832,4 +753,164 @@ function checkForAutomaticSessionChange(server: Server, playersInServer: Map<big
 
 
   return null;
+}
+
+type MessageEntityStore = EntityStore<'id', bigint, MessageWithRole>;
+
+/**
+ * Manage sent messages in the context of a server.
+ * "managing" here means saving ids to db, ensuring we only edit against the newest version of the message, etc
+ * TODO: if we need it, generalize this code so it can be used in other contexts
+ */
+class ServerMessageManager {
+  private messageMutexesDeferred = new Future<Map<bigint, Mutex>>();
+  private messageStoreDeferred = new Future<MessageEntityStore>();
+  private messageChangeSubjectDeferred = new Future<Subject<Change<MessageWithRole>>>();
+  private _mainServerMessageDeferred = new Future<Message>();
+  public get mainServerMessageDeferred() {
+    return this._mainServerMessageDeferred as Promise<Message>;
+  }
+
+
+  constructor(private server: Server, private channel: TextChannel) {
+  }
+
+  private async resolveMutex(messageId: bigint) {
+    const mutex = (await this.messageMutexesDeferred).get(messageId);
+    if (!mutex) {
+      throw new Error(`message ${messageId} is not tracked`);
+    }
+    return mutex;
+  }
+
+  async sendMessage(options: MessageOptions | string, role: ServerMessageRole) {
+    const msg = await this.channel.send(options);
+    let messageId = BigInt(msg.id);
+    await schema.server_managed_message(dbPool).insert({
+      server_id: this.server.id,
+      channel_id: BigInt(this.channel.id),
+      message_id: messageId,
+      role: role
+    });
+    (await this.messageMutexesDeferred).set(messageId, new Mutex());
+    let messageWithRole = { msg, role };
+    (await this.messageChangeSubjectDeferred).next({
+      type: 'added',
+      elt: messageWithRole
+    });
+    return msg;
+  }
+
+  async editManagedMessage(messageId: bigint, options: MessageEditOptions) {
+    const mutex = await this.resolveMutex(messageId);
+    await mutex.acquire();
+    try {
+      const msg = await this.channel.messages.fetch(messageId.toString());
+      await msg.edit(options);
+      let role = (await this.messageStoreDeferred).state.id.get(messageId)!.role;
+      (await this.messageChangeSubjectDeferred).next({
+        type: 'updated',
+        elt: { role, msg }
+      });
+      return msg;
+    } finally {
+      mutex.release();
+    }
+  }
+
+  async removeManagedMessage(messageId: bigint) {
+    const mutex = await this.resolveMutex(messageId);
+    await mutex.acquire();
+    try {
+      const msg = await this.channel.messages.fetch(messageId.toString());
+      await msg.delete();
+      await schema.server_managed_message(dbPool).delete({
+        server_id: this.server.id,
+        channel_id: BigInt(this.channel.id),
+        message_id: messageId
+      });
+      const role = (await this.messageStoreDeferred).state.id.get(BigInt(msg.id))!.role;
+      (await this.messageChangeSubjectDeferred).next({
+        type: 'removed',
+        elt: { msg, role }
+      });
+      return msg;
+    } finally {
+      mutex.release();
+    }
+  }
+
+  async upsertMainMessage(options: MessageOptions) {
+    const store = await this.messageStoreDeferred;
+    for (let entity of store.state.id.values()) {
+      if (entity.role === ServerMessageRole.Main) {
+        return this.editManagedMessage(store.indexes.id(entity), options as MessageEditOptions);
+      }
+    }
+    return this.sendMessage(options, ServerMessageRole.Main);
+  }
+
+  async setup(): Promise<ServerMessageManager> {
+    let channelId = BigInt(this.channel.id);
+    const rows = await schema.server_managed_message(dbPool).select({
+      server_id: this.server.id,
+      channel_id: channelId
+    }).all();
+
+    const messages = (await Promise.all(rows.map(async (row): Promise<MessageWithRole | null> => {
+      try {
+        let msg = await this.channel.messages.fetch(row.message_id.toString());
+        return ({
+          msg: msg,
+          role: row.role
+        });
+      } catch (err) {
+        if (err instanceof DiscordAPIError && err.code === 10008) {
+          await schema.server_managed_message(dbPool).delete(row);
+          return null;
+        }
+        throw err;
+      }
+    }))).filter(isNonNulled);
+
+    const existingMessage$ = from(messages).pipe(map(toChange('added')));
+
+    const messageSubject = new Subject<Change<MessageWithRole>>();
+
+    // stop sending/editing messages during wind-down process
+    const newMessages$ = messageSubject.pipe(registerInputObservable({ context: 'managedMessageSubject' }));
+
+    let storeIndexes = { id: (entity: MessageWithRole) => BigInt(entity.msg.id) };
+    const store = new EntityStore(concat(existingMessage$, newMessages$), storeIndexes, 'id') as MessageEntityStore;
+
+
+    // add/remove mutexes for all existing messages
+    const messageMutexMap = new Map();
+    store.trackAllEntities().subscribe((change) => {
+      let key = store.indexes.id(change.elt);
+      if (change.type === 'added') {
+        messageMutexMap.set(key, new Mutex());
+      } else if (change.type === 'removed') {
+        messageMutexMap.delete(key);
+      }
+    });
+
+
+    // track when main server message is created for object consumers
+    this.messageStoreDeferred.then(store =>
+      firstValueFrom(store.trackAllEntities().pipe(
+        filter(change => change.elt.role === ServerMessageRole.Main),
+        map(getElt),
+        map(elt => elt.msg)
+      ))
+    ).then((msg) => {
+      this._mainServerMessageDeferred.resolve(msg);
+    });
+
+    this.messageMutexesDeferred.resolve(messageMutexMap);
+    this.messageChangeSubjectDeferred.resolve(messageSubject);
+    this.messageStoreDeferred.resolve(store);
+
+    return this;
+  }
 }

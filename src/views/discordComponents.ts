@@ -1,4 +1,3 @@
-import GameDig from 'gamedig';
 import {
   ActionRowBuilder,
   SelectMenuBuilder,
@@ -21,8 +20,7 @@ import {
   User
 } from 'discord.js';
 import { v4 as uuidv4 } from 'uuid';
-import { discordClientDeferred } from './discordClient';
-import { NotifyWhen } from './models';
+import { NotifyWhen } from '../models';
 
 export const messageButtonIds = {
   signUp: 'sign-up',
@@ -156,33 +154,57 @@ export const seedMessageEmbedFieldNames = {
   playerCount: 'Players:'
 };
 
-export function serverSeedMessage(serverName: string, playerCount: number): MessageOptions {
-
+export function serverSeedMessage(
+  serverName: string,
+  mapName: string,
+  playerCount: number,
+  seederCount: number,
+  playerThresholdCoefficient: number,
+  seederThresholdCoefficient: number,
+  startSeedSessionThreshold: number
+): MessageOptions {
   // represents the ongoing state of the message
   const embedBuilder = new EmbedBuilder()
     .setTitle(`${serverName}`)
-    .setFields();
+    .setFields(
+      {
+        name: `Map`,
+        value: mapName,
+      },
+      {
+        name: `Players(bias: ${playerThresholdCoefficient})`,
+        value: playerCount.toString()
+      },
+      {
+        name: `Active Seeders(bias: ${playerThresholdCoefficient})`,
+        value: seederCount.toString()
+      },
+      {
+        name: `Starting seed at`,
+        value: startSeedSessionThreshold.toString()
+      }
+    );
 
   return {
     embeds: [embedBuilder]
   };
 }
 
-export function editServerSeedMessageMapName(msg: Message, mapName: string): MessageEditOptions | null {
-  const embed = msg.embeds[0];
-  let mapField: APIEmbedField | undefined = embed.fields.find(f => f.name.startsWith('Status: '));
-  if (!mapField) {
-    mapField = { name: 'Map: ', value: '' };
-    embed.fields.push(mapField as APIEmbedField);
-  }
-  if (mapField.value === mapName) {
-    return null;
-  }
-
-  mapField.value = mapName;
-
-  return { embeds: [embed] };
-}
+// export function editServerSeedMessageMapName(msg: Message, mapName: string): MessageEditOptions | null {
+//   const embed = msg.embeds[0];
+//   let mapField: APIEmbedField | undefined = embed.fields.find(f => f.name.startsWith('Status: '));
+//   if (!mapField) {
+//     mapField = { name: 'Map: ', value: '' };
+//     embed.fields.push(mapField as APIEmbedField);
+//   }
+//   if (mapField.value === mapName) {
+//     return null;
+//   }
+//
+//   mapField.value = mapName;
+//
+//   return { embeds: [embed] };
+// }
 
 export function editServerSeedMessagePlayerCount(msg: Message, playerCount: number): MessageEditOptions {
   const embed = msg.embeds[0];
@@ -210,7 +232,7 @@ export const signupModalIds = {
 
 export function signUpModal(): [ModalBuilder, string] {
   const modalBuilder = new ModalBuilder();
-  const modalId = `${signupModalIds.startOfModalId}-${uuidv4()}`
+  const modalId = `${signupModalIds.startOfModalId}-${uuidv4()}`;
   modalBuilder
     .setTitle('Sign Up')
     .setCustomId(modalId);

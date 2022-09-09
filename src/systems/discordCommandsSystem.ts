@@ -6,18 +6,18 @@ import {
 } from 'discord.js';
 import {
   createObserverTarget
-} from './cleanup';
-import { config } from './config';
-import { environment } from './globalServices/environment';
-import { logger } from './globalServices/logger';
-import { instanceTenantDeferred } from './instanceTenant';
-import { ServerWithDetails } from './models';
+} from '../cleanup';
+import { config } from 'config';
+import { environment } from 'services/environment';
+import { baseLogger } from 'services/baseLogger';
+import { instanceTenantDeferred } from './instanceTenantSystem';
+import { ServerWithDetails } from '../models';
 import { filter, map, mergeMap, withLatestFrom } from 'rxjs/operators';
-import { seederStoreDeferred } from './setupSeeders';
+import { seederStoreDeferred } from './seederSystem';
 import {
   activeSeedSessionsDeferred,
   serverStoreDeferred
-} from './setupServers';
+} from './serverSystem';
 
 export const commandNames = {
   configureServer: {
@@ -42,7 +42,7 @@ export const commandNames = {
   }
 };
 
-export async function registerDiscordCommands() {
+export async function setupDiscordCommands() {
   // register application commands
   const staticCommands = [
     new SlashCommandBuilder()
@@ -58,11 +58,11 @@ export async function registerDiscordCommands() {
 
   let commandRoutes = Routes.applicationGuildCommands(config.discord_client_id, (await instanceTenantDeferred).guild_id.toString());
   serverStoreDeferred.then(store => {
-    logger.info(store);
+    baseLogger.info(store);
 
     store.change$.subscribe(change => {
-      logger.info(store);
-      logger.info(change)
+      baseLogger.info(store);
+      baseLogger.info(change)
     })
   })
   const serverList$= (await serverStoreDeferred).trackAllEntities().pipe(withLatestFrom(serverStoreDeferred), map(([_, servers]) => [...servers.state.id.values()]));
@@ -71,7 +71,7 @@ export async function registerDiscordCommands() {
   // register start seed session command
   createObserverTarget(serverList$.pipe(
       filter(servers => servers.length > 0),
-      map(buildSstartSeedSessionCommand),
+      map(buildStartSeedSessionCommand),
       mergeMap(async command => {
           await rest.put(commandRoutes, { body: [command, ...staticCommands].map(c => c.toJSON()) });
         }
@@ -95,9 +95,9 @@ export async function registerDiscordCommands() {
   try {
     await rest.put(commandRoutes, { body: commands.map(c => c.toJSON()) });
   } catch (err) {
-    logger.error(err);
+    baseLogger.error(err);
   }
-  logger.info('successfully registered application commands');
+  baseLogger.info('successfully registered application commands');
 }
 
 function buildCancelSeedSessionCommand(seedingServers: ServerWithDetails[]) {
@@ -114,7 +114,7 @@ function buildCancelSeedSessionCommand(seedingServers: ServerWithDetails[]) {
     );
 }
 
-function buildSstartSeedSessionCommand(servers: ServerWithDetails[]) {
+function buildStartSeedSessionCommand(servers: ServerWithDetails[]) {
   return new SlashCommandBuilder()
     .setName(commandNames.startSeedingSession.name).setDescription('Start a moderated seeding session')
     .addStringOption(option =>
