@@ -63,7 +63,10 @@ observerLabel
 
 
 observerLabel.subscribe(change => {
-  baseLogger.debug(`observer change: ${change.type} ${change.elt}`, { change });
+  baseLogger.debug(`observer change: ${change.type} ${change.elt}`, {
+    context: baseLogger.defaultMeta!.context,
+    change
+  });
 });
 
 type ObserverNoError<T> = Omit<Partial<Observer<T>>, 'error'>;

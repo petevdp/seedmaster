@@ -1,29 +1,45 @@
 import { sql } from '@databases/pg';
 import { DiscordAPIError } from '@discordjs/rest';
+import { Seeder } from '__generated__';
 import { Mutex } from 'async-mutex';
-import parseHumanDate from 'parse-human-date';
+import compareAsc from 'date-fns/compareAsc';
 import discord, {
   ActivityType,
-  ButtonInteraction,
   Interaction,
   Message,
-  ModalSubmitInteraction,
-  SelectMenuInteraction,
   TextChannel
 } from 'discord.js';
+import { Change, flattenDeferred, getElt, toChange } from 'lib/asyncUtils';
 import {
-  combineLatest, concat,
+  catchInteractionError,
+  getInteractionObservable,
+  getPresenceObservable,
+  InteractionError,
+  isButtonInteraction,
+  isModalSubmissionInteraction,
+  isSelectObservable,
+  ReactionChange
+} from 'lib/discordUtils';
+import {
+  EntityStore,
+  getIdentityIndex,
+  IndexCollection
+} from 'lib/entityStore';
+import { Future } from 'lib/future';
+import { endWith, skipWhile, withLatestFrom } from 'lib/rxOperators';
+import { enumRepr, isDefined, isNonNulled } from 'lib/typeUtils';
+import parseHumanDate from 'parse-human-date';
+import {
+  combineLatest,
+  concat,
   EMPTY,
   from,
   merge,
   Observable,
-  Observer,
   of
 } from 'rxjs';
 import {
   catchError,
-  concatAll,
-  concatMap,
   distinct,
   filter,
   map,
@@ -33,47 +49,23 @@ import {
   startWith,
   tap
 } from 'rxjs/operators';
-import { Seeder } from '__generated__';
-import { createObserverTarget } from '../cleanup';
+import { baseLogger, MetadataError, steamClient } from 'services/baseLogger';
 import { config } from 'services/config';
 import { dbPool, schema } from 'services/db';
-import { discordClientDeferred } from './discordClientSystem';
 import {
   controlPanelMessage,
   mainSignupMessage,
-  messageButtonIds, pauseNotificationsModal, pauseNotificationsModalIds,
+  messageButtonIds,
+  pauseNotificationsModal,
+  pauseNotificationsModalIds,
   signUpModal,
-  signupModalIds, signUpPromptMessage,
+  signupModalIds,
+  signUpPromptMessage,
   welcomeMessage
 } from 'views/discordComponents';
-import {
-  baseLogger,
-  MetadataError,
-  steamClient
-} from 'services/baseLogger';
-import {
-  getInstanceGuild,
-  instanceTenantDeferred
-} from './instanceTenantSystem';
-import { Change, flattenDeferred, getElt, toChange } from 'lib/asyncUtils';
-import {
-  catchInteractionError,
-  getInteractionObservable,
-  getPresenceObservable,
-  InteractionError,
-  isButtonInteraction,
-  isModalSubmissionInteraction,
-  isSelectObservable, ReactionChange
-} from 'lib/discordUtils';
-import {
-  EntityStore,
-  getIdentityIndex, IdentityIndex,
-  IndexCollection
-} from 'lib/entityStore';
-import { Future } from 'lib/future';
-import { endWith, skipWhile, withLatestFrom } from 'lib/rxOperators';
-import { enumRepr, isDefined, isNonNulled } from 'lib/typeUtils';
-import compareAsc from 'date-fns/compareAsc';
+import { createObserverTarget } from '../cleanup';
+import { discordClient } from '../services/discordClient';
+import { getInstanceGuild, instanceTenant } from '../services/instanceTenant';
 import { NotifyWhen } from './serverSystem';
 
 //region Exported State
@@ -107,17 +99,12 @@ export function setupSeeders() {
   })();
 
   (async function ensureSignupMessageCreated() {
-    const discordClient = await discordClientDeferred;
-    const [instanceTenant, channel] = await Promise.all([instanceTenantDeferred, discordClient.channels.fetch(config.seeding_channel_id)]);
+    const channel = await discordClient.channels.fetch(config.seeding_channel_id);
     if (!channel!.isTextBased()) {
       throw new Error('seeding channel should be text based');
     }
     const textChannel = channel as TextChannel;
     const msgOptions = mainSignupMessage();
-
-    if (!instanceTenant.signup_message_id) {
-
-    }
 
     const persistMessageId = (msg: Message) => schema.tenant(dbPool).update({ id: instanceTenant.id }, { signup_message_id: BigInt(msg.id) });
     if (!instanceTenant.signup_message_id) {
@@ -148,7 +135,7 @@ export function setupSeeders() {
     type: 'added',
     elt: s
   })));
-  const interaction$ = flattenDeferred(discordClientDeferred.then(c => getInteractionObservable(c)));
+  const interaction$ = getInteractionObservable(discordClient);
   let seederInteraction$ = interaction$.pipe(
     filterNonSeederInteractions()
   );
@@ -388,7 +375,7 @@ export function setupSeeders() {
 }
 
 function observeNotifiable(discordId: bigint, steamId: bigint, notifySetting$: Observable<NotifyWhen>): Observable<boolean> {
-  const presenceUpdate$ = flattenDeferred(discordClientDeferred.then(discordClient => getPresenceObservable(discordClient).pipe(filter(p => p.userId === discordId.toString()))));
+  const presenceUpdate$ = getPresenceObservable(discordClient).pipe(filter(p => p.userId === discordId.toString()));
   const currentPresence$ = getInstanceGuild()
     .then(guild => guild.members.fetch(discordId.toString()))
     .then(member => member.fetch())

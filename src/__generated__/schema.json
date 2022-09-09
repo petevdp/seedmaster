@@ -1,5 +1,52 @@
 [
   {
+    "name": "managed_message",
+    "columns": [
+      {
+        "name": "channel_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 20,
+        "typeName": "BIGINT"
+      },
+      {
+        "name": "message_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 20,
+        "typeName": "BIGINT"
+      },
+      {
+        "name": "seed_session_id",
+        "isNullable": true,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
+        "name": "server_id",
+        "isNullable": true,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
+        "name": "tenant_id",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 23,
+        "typeName": "INTEGER"
+      },
+      {
+        "name": "type",
+        "isNullable": false,
+        "hasDefault": false,
+        "typeId": 33043,
+        "typeName": "MANAGED_MESSAGE_TYPE"
+      }
+    ]
+  },
+  {
     "name": "player",
     "columns": [
       {
@@ -242,39 +289,6 @@
     ]
   },
   {
-    "name": "server_managed_message",
-    "columns": [
-      {
-        "name": "channel_id",
-        "isNullable": false,
-        "hasDefault": false,
-        "typeId": 20,
-        "typeName": "BIGINT"
-      },
-      {
-        "name": "message_id",
-        "isNullable": false,
-        "hasDefault": false,
-        "typeId": 20,
-        "typeName": "BIGINT"
-      },
-      {
-        "name": "role",
-        "isNullable": false,
-        "hasDefault": false,
-        "typeId": 23,
-        "typeName": "INTEGER"
-      },
-      {
-        "name": "server_id",
-        "isNullable": false,
-        "hasDefault": false,
-        "typeId": 23,
-        "typeName": "INTEGER"
-      }
-    ]
-  },
-  {
     "name": "tenant",
     "columns": [
       {
@@ -293,7 +307,7 @@
       },
       {
         "name": "seed_channel_id",
-        "isNullable": true,
+        "isNullable": false,
         "hasDefault": false,
         "typeId": 20,
         "typeName": "BIGINT"

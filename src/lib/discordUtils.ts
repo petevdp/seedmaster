@@ -1,5 +1,6 @@
 import discord, {
   ButtonInteraction,
+  Channel,
   Interaction,
   Message,
   MessageReaction,
@@ -7,6 +8,7 @@ import discord, {
   PartialMessageReaction,
   PartialUser,
   SelectMenuInteraction,
+  TextChannel,
   User
 } from 'discord.js';
 import { from, Observable, of, fromEvent } from 'rxjs';
@@ -24,6 +26,7 @@ import { catchError } from './rxOperators';
 import { isNonNulled } from './typeUtils';
 
 
+// TODO: move to another file since we're introducing state into a lib module
 let interaction$: Observable<Interaction> | null = null;
 
 export function getInteractionObservable(client: discord.Client): Observable<Interaction> {
@@ -106,6 +109,7 @@ export function getPresenceObservable(client: discord.Client): Observable<discor
   );
 }
 
+//region Type Guards
 export function isButtonInteraction(interaction: Interaction): interaction is ButtonInteraction {
   return interaction.isButton();
 }
@@ -117,6 +121,11 @@ export function isModalSubmissionInteraction(interaction: Interaction): interact
 export function isSelectObservable(interaction: Interaction): interaction is SelectMenuInteraction {
   return interaction.isSelectMenu();
 }
+
+export function isChannelTextBased(channel: Channel): channel is TextChannel {
+  return channel.isTextBased();
+}
+//endregion
 
 
 // a specific thrown error that occurs during a discord interaction that we want to notify the user about

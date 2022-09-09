@@ -1,52 +1,41 @@
+import { TextChannel } from 'discord.js';
+import { mergeMap } from 'rxjs/operators';
 import {
-  TextChannel
-} from 'discord.js';
+  createObserverTarget,
+  getObserverCountRepr,
+  tryToFlushInputObservables
+} from './cleanup';
+import { getChatCommandInteraction } from './lib/discordUtils';
+import { baseLogger } from './services/baseLogger';
+import { config, setupConfig } from './services/config';
+import { dbPool, schema } from './services/db';
+import { discordClient, setupDiscordClient } from './services/discordClient';
 import {
-  mergeMap
-} from 'rxjs/operators';
-import {
-  discordClientDeferred,
-  setupDiscordClient
-} from './systems/discordClientSystem';
+  getInstanceGuild,
+  setupInstanceTenant
+} from './services/instanceTenant';
 import {
   commandNames,
   setupDiscordCommands
 } from './systems/discordCommandsSystem';
-import {
-  setupInstanceTenant, getInstanceGuild,
-  instanceTenantDeferred
-} from './systems/instanceTenantSystem';
-import {
-  flattenDeferred
-} from './lib/asyncUtils';
-import { config } from './services/config';
-import { dbPool } from './services/db';
-import { schema } from './services/db';
-import {
-  getChatCommandInteraction
-} from './lib/discordUtils';
-import {
-  createObserverTarget,
-  tryToFlushInputObservables,
-  getObserverCountRepr
-} from './cleanup';
-import { baseLogger } from './services/baseLogger';
+import { setupMessages } from './systems/messageSystem';
 import { setupSeeders } from './systems/seederSystem';
 import { setupServers } from './systems/serverSystem';
 
 
-export default function main() {
-  baseLogger.info('startup');
-
-  // setup all systems
-  setupInstanceTenant();
-  setupDiscordClient();
+export default async function main() {
+  setupConfig();
+  await Promise.all([
+    setupInstanceTenant(),
+    setupDiscordClient(),
+    setupDiscordCommands(),
+    setupMessages(),
+  ]);
   setupSeeders();
   setupServers();
-  setupDiscordCommands();
 
   (function handleGenericChatCommands() {
-    const chatCommandInteraction$ = flattenDeferred(discordClientDeferred.then(c => getChatCommandInteraction(c)));
+    const chatCommandInteraction$ = getChatCommandInteraction(discordClient);
 
     // handle reset messages
     createObserverTarget(chatCommandInteraction$.pipe(
@@ -61,7 +50,7 @@ export default function main() {
           baseLogger.debug(`author: ${msg.author.id} === bot: ${botMember.id}`);
           if (msg.author.id === botMember.id) {
             await msg.delete();
-            schema.server_managed_message(dbPool).delete({
+            schema.managed_message(dbPool).delete({
               message_id: BigInt(msg.id),
               channel_id: BigInt(channel.id)
             });

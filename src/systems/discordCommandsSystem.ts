@@ -10,7 +10,7 @@ import {
 import { config } from 'services/config';
 import { environment } from 'services/environment';
 import { baseLogger } from 'services/baseLogger';
-import { instanceTenantDeferred } from './instanceTenantSystem';
+import { instanceTenant } from '../services/instanceTenant';
 import { filter, map, mergeMap, withLatestFrom } from 'rxjs/operators';
 import { seederStoreDeferred } from './seederSystem';
 import {
@@ -55,7 +55,7 @@ export async function setupDiscordCommands() {
 
   const rest = new REST({ version: '10' }).setToken(environment.DISCORD_BOT_TOKEN);
 
-  let commandRoutes = Routes.applicationGuildCommands(config.discord_client_id, (await instanceTenantDeferred).guild_id.toString());
+  let commandRoutes = Routes.applicationGuildCommands(config.discord_client_id, instanceTenant.guild_id.toString());
   serverStoreDeferred.then(store => {
     baseLogger.info(store);
 

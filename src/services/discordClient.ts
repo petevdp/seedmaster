@@ -1,14 +1,12 @@
 import { environment } from 'services/environment';
-import discord from 'discord.js'
-import { Future } from 'lib/future';
+import discord from 'discord.js';
 
-let _discordClientDeferred = new Future<discord.Client>();
-export const discordClientDeferred = _discordClientDeferred as Promise<discord.Client>
+export let discordClient: discord.Client;
 
 export async function setupDiscordClient() {
   const client = new discord.Client({ intents: ['GuildMembers', 'Guilds', 'GuildMessages', 'GuildPresences'] });
   await client.login(environment.DISCORD_BOT_TOKEN);
-  _discordClientDeferred.resolve(client);
+  discordClient = client;
   return client;
 }
 
