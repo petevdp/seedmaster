@@ -1,5 +1,5 @@
-import { Tenant } from '../__generated__';
-import { config } from 'config';
+import { Tenant } from '__generated__';
+import { config } from 'services/config';
 import { dbPool, schema } from 'services/db';
 import { discordClientDeferred } from './discordClientSystem';
 import { Future } from 'lib/future';

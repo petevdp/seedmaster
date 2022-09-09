@@ -33,9 +33,9 @@ import {
   startWith,
   tap
 } from 'rxjs/operators';
-import { Seeder } from '../__generated__';
+import { Seeder } from '__generated__';
 import { createObserverTarget } from '../cleanup';
-import { config } from 'config';
+import { config } from 'services/config';
 import { dbPool, schema } from 'services/db';
 import { discordClientDeferred } from './discordClientSystem';
 import {
@@ -73,9 +73,10 @@ import {
 import { Future } from 'lib/future';
 import { endWith, skipWhile, withLatestFrom } from 'lib/rxOperators';
 import { enumRepr, isDefined, isNonNulled } from 'lib/typeUtils';
-import { NotifyWhen } from '../models';
 import compareAsc from 'date-fns/compareAsc';
+import { NotifyWhen } from './serverSystem';
 
+//region Exported State
 type indexLabels = 'discordId' | 'steamId'
 const seederIndexes: IndexCollection<indexLabels, bigint, Seeder> = {
   discordId: elt => elt.discord_id,
@@ -88,6 +89,8 @@ export const seederStoreDeferred = _seedersDeferred as Promise<SeederEntityStore
 type NotifiableSeederStore = EntityStore<'identity', bigint, bigint>;
 const _notifiableSeederStoreDeferred = new Future<NotifiableSeederStore>();
 export const notifiableSeedersStoreDeferred = _notifiableSeederStoreDeferred as Promise<NotifiableSeederStore>;
+
+//endregion
 
 
 export function setupSeeders() {
@@ -462,7 +465,6 @@ export function filterNonSeederReactions() {
     );
   };
 }
-
 
 export async function ensurePromptedSignup(discordUserId: string) {
   const [{ count }] = (await dbPool.query(sql`SELECT COUNT(*)

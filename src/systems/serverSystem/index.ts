@@ -1,4 +1,5 @@
 import { DiscordAPIError } from '@discordjs/rest';
+import { Player, Seeder, SeedSessionLog, Server } from '__generated__';
 import { Mutex } from 'async-mutex';
 import minutesToMilliseconds from 'date-fns/minutesToMilliseconds';
 import secondsToMilliseconds from 'date-fns/secondsToMilliseconds';
@@ -8,6 +9,28 @@ import discord, {
   MessageOptions,
   TextChannel
 } from 'discord.js';
+import {
+  catchErrorsOfClass,
+  Change,
+  changeOfType,
+  countEntities,
+  flattenDeferred,
+  getElt,
+  mapChange,
+  scanChangesToMap,
+  toChange,
+  trackUnifiedState
+} from 'lib/asyncUtils';
+import {
+  getChatCommandInteraction,
+  InteractionError,
+  observeMessageReactions
+} from 'lib/discordUtils';
+import { EntityStore, IndexCollection } from 'lib/entityStore';
+import { Future } from 'lib/future';
+import { observeOn, shareReplay, takeUntil } from 'lib/rxOperators';
+import { parseTimespan, TimespanParsingError } from 'lib/timespan';
+import { enumRepr, isNonNulled } from 'lib/typeUtils';
 import deepEquals from 'lodash/isEqual';
 import {
   asyncScheduler,
@@ -39,53 +62,23 @@ import {
   tap,
   withLatestFrom
 } from 'rxjs/operators';
-import { setTimeout } from 'timers/promises';
-import { Player, Seeder, SeedSessionLog, Server } from '../../__generated__';
-import { createObserverTarget, registerInputObservable } from '../../cleanup';
-import { config } from 'config';
+import { baseLogger, ppObj } from 'services/baseLogger';
+import { config } from 'services/config';
 import { dbPool, schema } from 'services/db';
-import { discordClientDeferred } from '../discordClientSystem';
-import { commandNames } from '../discordCommandsSystem';
+import { setTimeout } from 'timers/promises';
 import {
   playerJoinedSession,
   seedSessionStart,
   serverSeedMessage
 } from 'views/discordComponents';
-import { baseLogger, ppObj } from 'services/baseLogger';
-import { getInstanceGuild, instanceTenantDeferred } from '../instanceTenantSystem';
+import { createObserverTarget, registerInputObservable } from '../../cleanup';
+import { RawPlayer } from '../../services/config/Config';
+import { discordClientDeferred } from '../discordClientSystem';
+import { commandNames } from '../discordCommandsSystem';
 import {
-  catchErrorsOfClass,
-  Change,
-  changeOfType,
-  countEntities,
-  flattenDeferred,
-  getElt,
-  mapChange,
-  scanChangesToMap,
-  toChange,
-  trackUnifiedState
-} from 'lib/asyncUtils';
-import {
-  getChatCommandInteraction,
-  InteractionError,
-  observeMessageReactions
-} from 'lib/discordUtils';
-import { EntityStore, IndexCollection } from 'lib/entityStore';
-import { Future } from 'lib/future';
-import { observeOn, shareReplay, takeUntil } from 'lib/rxOperators';
-import { parseTimespan, TimespanParsingError } from 'lib/timespan';
-import { enumRepr, isNonNulled } from 'lib/typeUtils';
-import {
-  MessageWithRole,
-  PlayerWithDetails,
-  SeedLogEndReason,
-  SeedSessionEndReason,
-  SeedSessionEvent,
-  SeedSessionEventType,
-  ServerMessageRole,
-  ServerWithDetails,
-  SessionStartCommandOptions
-} from '../../models';
+  getInstanceGuild,
+  instanceTenantDeferred
+} from '../instanceTenantSystem';
 import {
   filterNonSeederReactions,
   notifiableSeedersStoreDeferred,
@@ -97,6 +90,62 @@ import {
 } from './squadServer';
 
 
+//region Types
+export type PlayerWithDetails = Player & Omit<RawPlayer, 'steamID' | 'playerID'>
+
+export enum NotifyWhen {
+  Online,
+  Playing,
+  Always,
+  Never,
+  PlayingSquad
+}
+
+export enum SeedSessionEndReason {
+  Success = 0,
+  Failure = 1,
+  Cancelled = 2
+}
+
+export enum SeedSessionEventType {
+  Success = 0,
+  Failure = 1,
+  Cancelled = 2,
+  Started = 3,
+}
+
+export enum SeedLogEndReason {
+  Success = 0,
+  Failure = 1,
+  Cancelled = 2,
+  Disconnected = 3,
+}
+
+export type SessionStartCommandOptions = {
+  gracePeriod?: number;
+  failureImpossible: boolean;
+}
+export type SeedSessionEvent =
+  | { type: SeedSessionEventType.Started; options: SessionStartCommandOptions }
+  | { type: SeedSessionEventType.Success; }
+  | { type: SeedSessionEventType.Failure; }
+  | { type: SeedSessionEventType.Cancelled; }
+
+export enum ServerMessageRole {
+  Main,
+  SessionStart,
+  PlayerJoined,
+  SessionEnded,
+}
+
+export type MessageWithRole = { msg: Message; role: ServerMessageRole };
+export type ServerDetails = { name: string; map: string; maxplayers: number; }
+export type ServerWithDetails = Server & ServerDetails;
+
+//endregion
+
+
+//region Exported State
 const serverIndexes = {
   id: (server: ServerWithDetails) => server.id
 };
@@ -121,8 +170,10 @@ type SignUpEntityStore = EntityStore<keyof (typeof signUpIndexes), bigint, SignU
 const _signUpReactions = new Future<SignUpEntityStore>();
 export const signUpReactions = _signUpReactions as Promise<SignUpEntityStore>;
 
+//endregion
 
-export async function index() {
+
+export async function setupServers() {
   const servers = await (async function initServerState() {
     const instanceTenant = await instanceTenantDeferred;
     const serversInDb = await schema.server(dbPool).select({ tenant_id: instanceTenant.id }).all();
@@ -755,8 +806,8 @@ function checkForAutomaticSessionChange(server: Server, playersInServer: Map<big
   return null;
 }
 
+//region ServerMessageManager
 type MessageEntityStore = EntityStore<'id', bigint, MessageWithRole>;
-
 /**
  * Manage sent messages in the context of a server.
  * "managing" here means saving ids to db, ensuring we only edit against the newest version of the message, etc
@@ -914,3 +965,4 @@ class ServerMessageManager {
     return this;
   }
 }
+//endregion

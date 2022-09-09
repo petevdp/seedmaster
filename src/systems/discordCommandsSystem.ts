@@ -7,16 +7,15 @@ import {
 import {
   createObserverTarget
 } from '../cleanup';
-import { config } from 'config';
+import { config } from 'services/config';
 import { environment } from 'services/environment';
 import { baseLogger } from 'services/baseLogger';
 import { instanceTenantDeferred } from './instanceTenantSystem';
-import { ServerWithDetails } from '../models';
 import { filter, map, mergeMap, withLatestFrom } from 'rxjs/operators';
 import { seederStoreDeferred } from './seederSystem';
 import {
   activeSeedSessionsDeferred,
-  serverStoreDeferred
+  serverStoreDeferred, ServerWithDetails
 } from './serverSystem';
 
 export const commandNames = {

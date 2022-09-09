@@ -1,7 +1,7 @@
 import createConnectionPool, { sql } from '@databases/pg';
 import tables from '@databases/pg-typed';
-import DatabaseSchema from '../__generated__';
-import jsonSchema from '../__generated__/schema.json';
+import DatabaseSchema from '__generated__';
+import jsonSchema from '__generated__/schema.json';
 
 export { sql };
 

@@ -1,39 +1,32 @@
 import {
   ActionRowBuilder,
-  SelectMenuBuilder,
-  APIEmbedField,
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
-  GuildMember,
   Message,
   MessageEditOptions,
   MessageOptions,
-  userMention,
-  hyperlink,
-  TextInputStyle,
-  ModalBuilder,
-  TextInputBuilder,
   ModalActionRowComponentBuilder,
-  APISelectMenuOption,
+  ModalBuilder,
+  SelectMenuBuilder,
   SelectMenuComponentOptionData,
-  User
+  TextInputBuilder,
+  TextInputStyle,
+  User,
+  userMention
 } from 'discord.js';
 import { v4 as uuidv4 } from 'uuid';
-import { NotifyWhen } from '../models';
+import { NotifyWhen } from '../systems/serverSystem';
 
 export const messageButtonIds = {
   signUp: 'sign-up',
   unregister: 'unregister',
   pauseNotifications: 'pause-notifications',
   notifyWhen: 'notify-when', unpauseNotifications: 'unpause-notifications'
-
 };
 
 
 const signupMessageLink = Promise.resolve('http://google.com');
-
-export type ContolPanelButtons = {}
 
 export function mainSignupMessage() {
   const signUpButton = new ButtonBuilder()

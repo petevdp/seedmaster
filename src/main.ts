@@ -19,7 +19,7 @@ import {
 import {
   flattenDeferred
 } from './lib/asyncUtils';
-import { config } from './config';
+import { config } from './services/config';
 import { dbPool } from './services/db';
 import { schema } from './services/db';
 import {
@@ -32,7 +32,7 @@ import {
 } from './cleanup';
 import { baseLogger } from './services/baseLogger';
 import { setupSeeders } from './systems/seederSystem';
-import { index } from './systems/serverSystem';
+import { setupServers } from './systems/serverSystem';
 
 
 export default function main() {
@@ -42,7 +42,7 @@ export default function main() {
   setupInstanceTenant();
   setupDiscordClient();
   setupSeeders();
-  index();
+  setupServers();
   setupDiscordCommands();
 
   (function handleGenericChatCommands() {

@@ -7,12 +7,12 @@ import { observeOn, share } from 'rxjs/operators';
 import WebSocket from 'ws';
 import { Server } from '__generated__';
 import { registerInputObservable } from 'cleanup';
-import { config } from 'config';
-import { RawPlayer } from 'config/Config';
+import { config } from 'services/config';
+import { RawPlayer } from 'services/config/Config';
 import { baseLogger as masterLogger } from 'services/baseLogger';
 import { auditChanges, Change, mapChange, TimedChange } from 'lib/asyncUtils';
 import { map, takeUntil } from 'lib/rxOperators';
-import { ServerDetails, ServerWithDetails } from 'models';
+import { ServerDetails, ServerWithDetails } from './index';
 
 
 type SquadJSMessage = TimedChange<RawPlayer>;
