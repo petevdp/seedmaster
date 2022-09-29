@@ -8,6 +8,7 @@ config-test*.json
 node_modules/
 package-lock.json
 yarn.lock
+squadlogs/
 
 # IDEs
 .idea/
