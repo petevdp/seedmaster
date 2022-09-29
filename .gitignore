@@ -10,3 +10,5 @@ coverage
 .env
 /src/logs/
 /fixtures/
+squadlogs/
+sample_logs/
